@@ -1,0 +1,13 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++ gcc-multilib g++-multilib grub-pc-bin grub-common xorriso mtools
+      - run: make
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minimalzero-iso
+          path: minimalzero.iso
