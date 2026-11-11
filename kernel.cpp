@@ -1,8 +1,8 @@
 typedef unsigned char  u8;
 typedef unsigned short u16;
 typedef unsigned int   u32;
+typedef unsigned long long u64;
 
-// ---------- Базовая математика и память ----------
 extern "C" void* memcpy(void* d, const void* s, u32 n) {
     u8* a = (u8*)d; const u8* b = (const u8*)s; while (n--) *a++ = *b++; return d;
 }
@@ -12,14 +12,42 @@ extern "C" void* memset(void* d, int v, u32 n) {
 static inline void outb(u16 p, u8 v) { asm volatile("outb %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u8   inb(u16 p)        { u8 v; asm volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 
-// ---------- Графический драйвер (VESA) ----------
+// ---------- Структура Multiboot ----------
+struct multiboot_info {
+    u32 flags;
+    u32 mem_lower, mem_upper;
+    u32 boot_device, cmdline, mods_count, mods_addr;
+    u32 syms[4];
+    u32 mmap_length, mmap_addr;
+    u32 drives_length, drives_addr;
+    u32 config_table, boot_loader_name, apm_table;
+    u32 vbe_control_info, vbe_mode_info;
+    u16 vbe_mode, vbe_interface_seg, vbe_interface_off, vbe_interface_len;
+    u64 framebuffer_addr;
+    u32 framebuffer_pitch;
+    u32 framebuffer_width;
+    u32 framebuffer_height;
+    u8  framebuffer_bpp;
+    u8  framebuffer_type;
+} __attribute__((packed));
+
+// ---------- Графика ----------
 namespace gfx {
-    u32* fb = (u32*)0xFD000000; // Адрес видеопамяти VESA LFB
-    const int W = 1024;
-    const int H = 768;
+    u32* fb = nullptr;
+    int W = 0, H = 0, pitch = 0;
+
+    void init(multiboot_info* mb) {
+        // Если загрузчик передал инфу о фреймбуфере (бит 12)
+        if (mb->flags & (1 << 12)) {
+            fb = (u32*)(u32)mb->framebuffer_addr;
+            W = mb->framebuffer_width;
+            H = mb->framebuffer_height;
+            pitch = mb->framebuffer_pitch / 4;
+        }
+    }
 
     void put_pixel(int x, int y, u32 color) {
-        if (x >= 0 && x < W && y >= 0 && y < H) fb[y * W + x] = color;
+        if (x >= 0 && x < W && y >= 0 && y < H) fb[y * pitch + x] = color;
     }
 
     void fill_rect(int x, int y, int w, int h, u32 color) {
@@ -28,24 +56,105 @@ namespace gfx {
         if (x + w > W) w = W - x;
         if (y + h > H) h = H - y;
         for (int j = 0; j < h; j++) {
-            u32* row = &fb[(y + j) * W + x];
+            u32* row = &fb[(y + j) * pitch + x];
             for (int i = 0; i < w; i++) row[i] = color;
         }
     }
 
     void draw_rect(int x, int y, int w, int h, u32 color) {
-        fill_rect(x, y, w, 1, color);       // верх
-        fill_rect(x, y + h - 1, w, 1, color); // низ
-        fill_rect(x, y, 1, h, color);       // лево
-        fill_rect(x + w - 1, y, 1, h, color); // право
+        fill_rect(x, y, w, 1, color);
+        fill_rect(x, y + h - 1, w, 1, color);
+        fill_rect(x, y, 1, h, color);
+        fill_rect(x + w - 1, y, 1, h, color);
+    }
+
+    // Базовый шрифт 8x8 (ASCII 32-127)
+    static const u8 font8x8[96][8] = {
+        {0,0,0,0,0,0,0,0}, // Space
+        {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // !
+        {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00}, // "
+        {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00}, // #
+        {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00}, // $
+        {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00}, // %
+        {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00}, // &
+        {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00}, // '
+        {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00}, // (
+        {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00}, // )
+        {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // *
+        {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00}, // +
+        {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06}, // ,
+        {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00}, // -
+        {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}, // .
+        {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00}, // /
+        {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
+        {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
+        {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // 2
+        {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // 3
+        {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // 4
+        {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // 5
+        {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // 6
+        {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // 7
+        {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // 8
+        {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // 9
+        {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00}, // :
+        {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06}, // ;
+        {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00}, // <
+        {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00}, // =
+        {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // >
+        {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00}, // ?
+        {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00}, // @
+        {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00}, // A
+        {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00}, // B
+        {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00}, // C
+        {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00}, // D
+        {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00}, // E
+        {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00}, // F
+        {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00}, // G
+        {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00}, // H
+        {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // I
+        {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00}, // J
+        {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00}, // K
+        {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00}, // L
+        {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00}, // M
+        {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00}, // N
+        {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00}, // O
+        {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00}, // P
+        {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00}, // Q
+        {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00}, // R
+        {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00}, // S
+        {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // T
+        {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00}, // U
+        {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00}, // V
+        {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}, // W
+        {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00}, // X
+        {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00}, // Y
+        {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00}, // Z
+        // ... остальные символы можно добавить по аналогии, для экономии места опущены
+    };
+
+    void draw_char(int x, int y, char c, u32 color) {
+        if (c < 32 || c > 127) return;
+        int idx = c - 32;
+        for (int j = 0; j < 8; j++) {
+            u8 row = font8x8[idx][j];
+            for (int i = 0; i < 8; i++) {
+                if (row & (1 << i)) put_pixel(x + i, y + j, color);
+            }
+        }
+    }
+
+    void draw_text(int x, int y, const char* str, u32 color) {
+        while (*str) {
+            draw_char(x, y, *str++, color);
+            x += 8;
+        }
     }
 }
 
-// ---------- Мышь PS/2 ----------
+// ---------- Мышь ----------
 namespace mouse {
-    int x = 512, y = 384; // Центр экрана
-    int ax = 0, ay = 0, idx = 0;
-    u8 btn = 0, pkt[3];
+    int x = 512, y = 384;
+    u8 btn = 0, pkt[3], idx = 0;
 
     void wait_w() { int t = 100000; while ((inb(0x64) & 2) && --t) {} }
     bool wait_r() { int t = 100000; while (!(inb(0x64) & 1) && --t) {} return t > 0; }
@@ -71,7 +180,6 @@ namespace mouse {
         int dx = pkt[1] - ((pkt[0] << 4) & 0x100);
         int dy = pkt[2] - ((pkt[0] << 3) & 0x100);
         
-        // Масштабируем скорость мыши под 1024x768
         x += dx * 2; 
         y -= dy * 2; 
 
@@ -83,86 +191,77 @@ namespace mouse {
     }
 }
 
-// ---------- Рисование курсора мыши ----------
-// Рисуем классическую стрелочку 12x19
 static void draw_mouse_cursor(int mx, int my) {
-    const char* cursor_shape[19] = {
-        "X           ",
-        "XX          ",
-        "X.X         ",
-        "X..X        ",
-        "X...X       ",
-        "X....X      ",
-        "X.....X     ",
-        "X......X    ",
-        "X.......X   ",
-        "X........X  ",
-        "X.....XXXXX ",
-        "X..X..X     ",
-        "X.X X..X    ",
-        "XX  X..X    ",
-        "X    X..X   ",
-        "     X..X   ",
-        "      X..X  ",
-        "      X..X  ",
-        "       XX   "
+    const char* shape[19] = {
+        "X           ", "XX          ", "X.X         ", "X..X        ",
+        "X...X       ", "X....X      ", "X.....X     ", "X......X    ",
+        "X.......X   ", "X........X  ", "X.....XXXXX ", "X..X..X     ",
+        "X.X X..X    ", "XX  X..X    ", "X    X..X   ", "     X..X   ",
+        "      X..X  ", "      X..X  ", "       XX   "
     };
     for (int j = 0; j < 19; j++) {
         for (int i = 0; i < 12; i++) {
-            if (cursor_shape[j][i] == 'X') gfx::put_pixel(mx + i, my + j, 0x000000); // Черный контур
-            else if (cursor_shape[j][i] == '.') gfx::put_pixel(mx + i, my + j, 0xFFFFFF); // Белая заливка
+            if (shape[j][i] == 'X') gfx::put_pixel(mx + i, my + j, 0x000000);
+            else if (shape[j][i] == '.') gfx::put_pixel(mx + i, my + j, 0xFFFFFF);
         }
     }
 }
 
 // ---------- Рабочий стол ----------
 static void draw_desktop() {
-    // 1. Фон (приятный синий градиент/цвет)
-    gfx::fill_rect(0, 0, gfx::W, gfx::H, 0x1A3C6C);
+    gfx::fill_rect(0, 0, gfx::W, gfx::H, 0x1A3C6C); // Синий фон
 
-    // 2. Панель задач (сверху)
+    // Панель задач
     gfx::fill_rect(0, 0, gfx::W, 40, 0x2D2D2D);
-    gfx::draw_rect(0, 0, gfx::W, 40, 0x555555);
+    gfx::draw_text(20, 16, "MinimalZero OS v0.3 (GUI)", 0xFFFFFF);
 
-    // 3. Окно "Files" (просто для примера)
-    int wx = 100, wy = 150, ww = 500, wh = 400;
+    // Иконки
+    gfx::fill_rect(50, 100, 64, 64, 0xF0C040);
+    gfx::draw_text(50, 170, "Files", 0xFFFFFF);
     
-    // Тень окна
-    gfx::fill_rect(wx + 5, wy + 5, ww, wh, 0x0A0A0A);
-    // Фон окна
-    gfx::fill_rect(wx, wy, ww, wh, 0xE0E0E0);
-    // Заголовок окна
-    gfx::fill_rect(wx, wy, ww, 30, 0x3E7BFA);
-    // Рамка окна
-    gfx::draw_rect(wx, wy, ww, wh, 0x808080);
+    gfx::fill_rect(50, 220, 64, 64, 0x40C0F0);
+    gfx::draw_text(50, 290, "Trash", 0xFFFFFF);
+
+    // Окно "Files"
+    int wx = 200, wy = 150, ww = 600, wh = 400;
+    gfx::fill_rect(wx + 10, wy + 10, ww, wh, 0x0A0A0A); // Тень
+    gfx::fill_rect(wx, wy, ww, wh, 0xE0E0E0); // Фон окна
+    gfx::fill_rect(wx, wy, ww, 30, 0x3E7BFA); // Заголовок
+    gfx::draw_rect(wx, wy, ww, wh, 0x808080); // Рамка
+    gfx::draw_text(wx + 10, wy + 10, "File Manager", 0xFFFFFF);
     
     // Кнопка закрытия (крестик)
     gfx::fill_rect(wx + ww - 25, wy + 5, 20, 20, 0xE81123);
     gfx::fill_rect(wx + ww - 20, wy + 8, 10, 2, 0xFFFFFF);
     gfx::fill_rect(wx + ww - 20, wy + 15, 10, 2, 0xFFFFFF);
 
-    // 4. Иконки на рабочем столе
-    gfx::fill_rect(50, 100, 64, 64, 0xF0C040); // Иконка "Files"
-    gfx::fill_rect(50, 200, 64, 64, 0x40C0F0); // Иконка "Trash"
+    // Содержимое окна
+    gfx::draw_text(wx + 20, wy + 60, "readme.txt", 0x000000);
+    gfx::draw_text(wx + 20, wy + 80, "hello.txt", 0x000000);
+    gfx::draw_text(wx + 20, wy + 100, "notes.txt", 0x000000);
 }
 
-// ---------- Точка входа ----------
-extern "C" void kmain() {
+extern "C" void kmain(u32 magic, multiboot_info* mb) {
+    if (magic != 0x2BADB002) {
+        // Ошибка загрузчика (не Multiboot)
+        for(;;);
+    }
+
+    gfx::init(mb);
     mouse::init();
     
-    // Основной цикл
     for (;;) {
-        draw_desktop();             // Отрисовка фона и окон
-        draw_mouse_cursor(mouse::x, mouse::y); // Отрисовка курсора поверх
+        draw_desktop();
+        draw_mouse_cursor(mouse::x, mouse::y);
         
-        // Опрос мыши
+        // Обработка мыши
         u8 st = inb(0x64);
         if (st & 1) {
             u8 b = inb(0x60);
-            if (st & 0x20) mouse::feed(b); // Если это мышь
+            if (st & 0x20) mouse::feed(b);
         }
         
-        // Небольшая задержка, чтобы не грузить CPU на 100%
-        for (volatile int i = 0; i < 100000; i++); 
+        // Задержка
+        for (volatile int i = 0; i < 500000; i++); 
     }
 }
