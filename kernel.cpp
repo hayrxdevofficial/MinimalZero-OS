@@ -21,81 +21,48 @@ struct multiboot_info {
     u32 framebuffer_height; u8 framebuffer_bpp; u8 framebuffer_type;
 } __attribute__((packed));
 
-// ======================= ОБРАБОТКА ПРЕРЫВАНИЙ =======================
-struct idt_entry { u16 base_lo; u16 sel; u8 zero; u8 flags; u16 base_hi; } __attribute__((packed));
-struct idt_ptr { u16 limit; u32 base; } __attribute__((packed));
-static idt_entry idt[256];
-static idt_ptr idtp;
-
-extern "C" void isr_common();
-asm(
-    ".global isr_common\n"
-    "isr_common:\n"
-    "    pusha\n"
-    "    movb $0x20, %al\n"
-    "    outb %al, $0x20\n" // Отправляем EOI в PIC
-    "    popa\n"
-    "    iret\n"
-);
-
-static void set_idt_gate(int n, u32 handler) {
-    idt[n].base_lo = handler & 0xFFFF;
-    idt[n].sel = 0x08;
-    idt[n].zero = 0;
-    idt[n].flags = 0x8E;
-    idt[n].base_hi = handler >> 16;
-}
-
-void init_idt_pic_pit() {
-    idtp.limit = sizeof(idt) - 1;
-    idtp.base = (u32)&idt;
-    for (int i = 0; i < 256; i++) set_idt_gate(i, (u32)isr_common);
-    asm volatile("lidt %0" : : "m"(idtp));
-
-    // Настройка PIC
-    outb(0x20, 0x11); outb(0xA0, 0x11);
-    outb(0x21, 0x20); outb(0xA1, 0x28);
-    outb(0x21, 0x04); outb(0xA1, 0x02);
-    outb(0x21, 0x01); outb(0xA1, 0x01);
-    outb(0x21, 0xFE); // Разрешаем только IRQ0 (таймер)
-    outb(0xA1, 0xFF);
-
-    // Настройка PIT на 60 Гц
-    u32 divisor = 1193180 / 60;
-    outb(0x43, 0x36);
-    outb(0x40, divisor & 0xFF);
-    outb(0x40, divisor >> 8);
-}
-// ====================================================================
-
 namespace gfx {
     u32* fb = nullptr;
-    int W = 640; int H = 480; int pitch = 0;
-    static u32 back_buffer[640 * 480];
+    int W = 800;
+    int H = 600;
+    int pitch = 0;
+    static u32 back_buffer[800 * 600];
 
     void init(multiboot_info* mb) {
         if (mb->flags & (1 << 12)) {
             fb = (u32*)(u32)mb->framebuffer_addr;
-            W = mb->framebuffer_width; H = mb->framebuffer_height;
+            W = mb->framebuffer_width;
+            H = mb->framebuffer_height;
             pitch = mb->framebuffer_pitch / 4;
         }
     }
+
     void put_pixel(int x, int y, u32 color) {
         if (x >= 0 && x < W && y >= 0 && y < H) back_buffer[y * W + x] = color;
     }
+
     void fill_rect(int x, int y, int w, int h, u32 color) {
-        if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
-        if (x + w > W) w = W - x; if (y + h > H) h = H - y;
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > W) w = W - x;
+        if (y + h > H) h = H - y;
+        if (w <= 0 || h <= 0) return;
         for (int j = 0; j < h; j++) {
             u32* row = &back_buffer[(y + j) * W + x];
             for (int i = 0; i < w; i++) row[i] = color;
         }
     }
+
     void draw_rect(int x, int y, int w, int h, u32 color) {
         fill_rect(x, y, w, 1, color); fill_rect(x, y + h - 1, w, 1, color);
         fill_rect(x, y, 1, h, color); fill_rect(x + w - 1, y, 1, h, color);
     }
-    void swap() { memcpy((void*)fb, back_buffer, W * H * 4); }
+
+    void swap() {
+        u32* dest = fb;
+        u32* src = back_buffer;
+        for (u32 i = 0; i < (u32)(W * H); i++) dest[i] = src[i];
+    }
 
     static const u8 font8x8[96][8] = {
         {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},
@@ -162,7 +129,7 @@ namespace gfx {
 }
 
 namespace mouse {
-    int x = 320, y = 240;
+    int x = 400, y = 300;
     u8 btn = 0, pkt[3], idx = 0;
     void wait_w() { int t = 10000; while ((inb(0x64) & 2) && --t) {} }
     bool wait_r() { int t = 10000; while (!(inb(0x64) & 1) && --t) {} return t > 0; }
@@ -204,34 +171,103 @@ static void draw_mouse_cursor(int mx, int my) {
     }
 }
 
-static bool showWelcome = true;
-static void draw_desktop() {
-    gfx::fill_rect(0, 0, gfx::W, gfx::H, 0x1A3C6C);
-    gfx::fill_rect(0, 0, gfx::W, 30, 0x2D2D2D);
-    gfx::draw_text(10, 11, "MinimalZero OS v0.6 (Fast)", 0xFFFFFF);
+// ==================== СОСТОЯНИЯ СИСТЕМЫ ====================
+enum OS_State {
+    STATE_BOOT_MENU,
+    STATE_DESKTOP_NORMAL,
+    STATE_DESKTOP_SAFE
+};
 
+static OS_State current_state = STATE_BOOT_MENU;
+static int menu_selection = 0; // 0 = Normal, 1 = Safe, 2 = Restart
+static bool showWelcome = false;
+static u8 prev_btn = 0;
+
+// ==================== ОТРИСОВКА МЕНЮ ====================
+static void draw_boot_menu() {
+    // Синий фон (классический цвет установщика Windows)
+    gfx::fill_rect(0, 0, gfx::W, gfx::H, 0x000080);
+    
+    // Верхняя и нижняя панели
+    gfx::fill_rect(0, 0, gfx::W, 40, 0x000000);
+    gfx::draw_text(20, 16, "MinimalZero OS - Boot Menu", 0xFFFFFF);
+    
+    gfx::fill_rect(0, gfx::H - 40, gfx::W, 40, 0x000000);
+    gfx::draw_text(20, gfx::H - 24, "Use ARROWS and ENTER, or click with mouse.", 0xAAAAAA);
+
+    // Окно меню по центру
+    int wx = 200, wy = 150, ww = 400, wh = 250;
+    gfx::fill_rect(wx, wy, ww, wh, 0x0000AA);
+    gfx::draw_rect(wx, wy, ww, wh, 0xFFFFFF);
+    gfx::draw_rect(wx+1, wy+1, ww-2, wh-2, 0x555555);
+
+    const char* options[3] = {
+        "Start in Normal Mode",
+        "Start in Safe Mode",
+        "Restart"
+    };
+
+    for (int i = 0; i < 3; i++) {
+        int bx = wx + 20, by = wy + 30 + i * 60, bw = ww - 40, bh = 40;
+        
+        if (i == menu_selection) {
+            gfx::fill_rect(bx, by, bw, bh, 0xAAAAAA); // Подсветка
+            gfx::draw_text(bx + 10, by + 16, options[i], 0x000000);
+        } else {
+            gfx::fill_rect(bx, by, bw, bh, 0x000080);
+            gfx::draw_rect(bx, by, bw, bh, 0xAAAAAA);
+            gfx::draw_text(bx + 10, by + 16, options[i], 0xFFFFFF);
+        }
+    }
+}
+
+// ==================== ОТРИСОВКА РАБОЧЕГО СТОЛА ====================
+static void draw_desktop() {
+    bool safe_mode = (current_state == STATE_DESKTOP_SAFE);
+    u32 bg_color = safe_mode ? 0x000000 : 0x1A3C6C;
+
+    gfx::fill_rect(0, 0, gfx::W, gfx::H, bg_color);
+    gfx::fill_rect(0, 0, gfx::W, 30, 0x2D2D2D);
+    
+    if (safe_mode) {
+        gfx::draw_text(10, 11, "MinimalZero OS (Safe Mode)", 0xFFFF00);
+    } else {
+        gfx::draw_text(10, 11, "MinimalZero OS (Normal Mode)", 0xFFFFFF);
+    }
+
+    // Иконки
     gfx::fill_rect(30, 60, 48, 48, 0xF0C040);
     gfx::draw_text(30, 115, "Files", 0xFFFFFF);
-    gfx::fill_rect(30, 150, 48, 48, 0x40C0F0);
-    gfx::draw_text(30, 205, "Trash", 0xFFFFFF);
+    
+    if (!safe_mode) {
+        gfx::fill_rect(30, 150, 48, 48, 0x40C0F0);
+        gfx::draw_text(30, 205, "Trash", 0xFFFFFF);
+    }
 
     if (showWelcome) {
         int wx = 120, wy = 80, ww = 400, wh = 300;
         gfx::fill_rect(wx + 5, wy + 5, ww, wh, 0x0A0A0A);
         gfx::fill_rect(wx, wy, ww, wh, 0xF0F0F0);
-        gfx::fill_rect(wx, wy, ww, 30, 0x0078D7);
+        gfx::fill_rect(wx, wy, ww, 30, safe_mode ? 0x888888 : 0x0078D7);
         gfx::draw_rect(wx, wy, ww, wh, 0x808080);
+        
         gfx::draw_text(wx + 10, wy + 11, "Welcome to MinimalZero", 0xFFFFFF);
         
+        // Кнопка закрытия
         gfx::fill_rect(wx + ww - 25, wy + 5, 20, 20, 0xE81123);
         for (int i = 0; i < 10; i++) {
             gfx::put_pixel(wx + ww - 20 + i, wy + 8 + i, 0xFFFFFF);
             gfx::put_pixel(wx + ww - 20 + i, wy + 17 - i, 0xFFFFFF);
         }
-        gfx::draw_text(wx + 20, wy + 60, "Hello! Smooth rendering is ON.", 0x000000);
-        gfx::draw_text(wx + 20, wy + 90, "CPU sleeps 60 times per second.", 0x333333);
-        gfx::draw_text(wx + 20, wy + 140, "How to use:", 0x000000);
-        gfx::draw_text(wx + 20, wy + 170, "- Click [X] to close this window.", 0x444444);
+        
+        if (safe_mode) {
+            gfx::draw_text(wx + 20, wy + 60, "You are in SAFE MODE.", 0x000000);
+            gfx::draw_text(wx + 20, wy + 90, "Some features (like Trash) are disabled.", 0x333333);
+        } else {
+            gfx::draw_text(wx + 20, wy + 60, "Normal mode active.", 0x000000);
+            gfx::draw_text(wx + 20, wy + 90, "All features are available.", 0x333333);
+        }
+        gfx::draw_text(wx + 20, wy + 140, "Click [X] to close this window.", 0x444444);
     }
 }
 
@@ -239,35 +275,70 @@ extern "C" void kmain(u32 magic, multiboot_info* mb) {
     if (magic != 0x2BADB002) for(;;);
     gfx::init(mb);
     mouse::init();
-    init_idt_pic_pit();
-    asm volatile("sti"); // Включаем прерывания для работы hlt
-    
-    u8 prev_btn = 0;
     
     for (;;) {
-        // Опрос мыши
+        // 1. Опрос мыши и клавиатуры
         u8 st = inb(0x64);
         if (st & 1) {
             u8 b = inb(0x60);
-            if (st & 0x20) mouse::feed(b);
+            if (st & 0x20) {
+                mouse::feed(b);
+            } else {
+                // Обработка клавиатуры
+                if (!(b & 0x80)) { // Нажатие
+                    if (b == 0x48) { // Up
+                        if (current_state == STATE_BOOT_MENU && menu_selection > 0) menu_selection--;
+                    } else if (b == 0x50) { // Down
+                        if (current_state == STATE_BOOT_MENU && menu_selection < 2) menu_selection++;
+                    } else if (b == 0x1C) { // Enter
+                        if (current_state == STATE_BOOT_MENU) {
+                            if (menu_selection == 0) { current_state = STATE_DESKTOP_NORMAL; showWelcome = true; }
+                            else if (menu_selection == 1) { current_state = STATE_DESKTOP_SAFE; showWelcome = true; }
+                            else if (menu_selection == 2) { asm volatile("int $0x19"); } // Рестарт
+                        }
+                    }
+                }
+            }
         }
 
-        // Отрисовка
-        draw_desktop();
-        draw_mouse_cursor(mouse::x, mouse::y);
-        gfx::swap();
-        
-        // Клики
+        // 2. Обработка кликов мыши
         u8 current_btn = mouse::btn;
         if ((current_btn & 1) && !(prev_btn & 1)) {
-            int mx = mouse::x, my = mouse::y;
-            if (showWelcome) {
+            int mx = mouse::x;
+            int my = mouse::y;
+
+            if (current_state == STATE_BOOT_MENU) {
+                int wx = 200, wy = 150, ww = 400;
+                if (mx >= wx + 20 && mx <= wx + ww - 20) {
+                    for (int i = 0; i < 3; i++) {
+                        int by = wy + 30 + i * 60;
+                        if (my >= by && my <= by + 40) {
+                            menu_selection = i;
+                            if (i == 0) { current_state = STATE_DESKTOP_NORMAL; showWelcome = true; }
+                            else if (i == 1) { current_state = STATE_DESKTOP_SAFE; showWelcome = true; }
+                            else if (i == 2) { asm volatile("int $0x19"); }
+                        }
+                    }
+                }
+            } else if (showWelcome) {
                 int wx = 120, wy = 80, ww = 400;
-                if (mx >= wx + ww - 25 && mx <= wx + ww - 5 && my >= wy + 5 && my <= wy + 25) showWelcome = false;
+                if (mx >= wx + ww - 25 && mx <= wx + ww - 5 && my >= wy + 5 && my <= wy + 25) {
+                    showWelcome = false;
+                }
             }
         }
         prev_btn = current_btn;
-        
-        asm volatile("hlt"); // СПИМ! Процессор просыпается от таймера (60 раз в секунду)
+
+        // 3. Отрисовка
+        if (current_state == STATE_BOOT_MENU) {
+            draw_boot_menu();
+        } else {
+            draw_desktop();
+        }
+        draw_mouse_cursor(mouse::x, mouse::y);
+        gfx::swap();
+
+        // 4. Пауза для разгрузки процессора (без прерываний)
+        asm volatile("pause");
     }
 }
