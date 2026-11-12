@@ -21,48 +21,82 @@ struct multiboot_info {
     u32 framebuffer_height; u8 framebuffer_bpp; u8 framebuffer_type;
 } __attribute__((packed));
 
+// ======================= ОБРАБОТКА ПРЕРЫВАНИЙ =======================
+struct idt_entry { u16 base_lo; u16 sel; u8 zero; u8 flags; u16 base_hi; } __attribute__((packed));
+struct idt_ptr { u16 limit; u32 base; } __attribute__((packed));
+static idt_entry idt[256];
+static idt_ptr idtp;
+
+extern "C" void isr_common();
+asm(
+    ".global isr_common\n"
+    "isr_common:\n"
+    "    pusha\n"
+    "    movb $0x20, %al\n"
+    "    outb %al, $0x20\n" // Отправляем EOI в PIC
+    "    popa\n"
+    "    iret\n"
+);
+
+static void set_idt_gate(int n, u32 handler) {
+    idt[n].base_lo = handler & 0xFFFF;
+    idt[n].sel = 0x08;
+    idt[n].zero = 0;
+    idt[n].flags = 0x8E;
+    idt[n].base_hi = handler >> 16;
+}
+
+void init_idt_pic_pit() {
+    idtp.limit = sizeof(idt) - 1;
+    idtp.base = (u32)&idt;
+    for (int i = 0; i < 256; i++) set_idt_gate(i, (u32)isr_common);
+    asm volatile("lidt %0" : : "m"(idtp));
+
+    // Настройка PIC
+    outb(0x20, 0x11); outb(0xA0, 0x11);
+    outb(0x21, 0x20); outb(0xA1, 0x28);
+    outb(0x21, 0x04); outb(0xA1, 0x02);
+    outb(0x21, 0x01); outb(0xA1, 0x01);
+    outb(0x21, 0xFE); // Разрешаем только IRQ0 (таймер)
+    outb(0xA1, 0xFF);
+
+    // Настройка PIT на 60 Гц
+    u32 divisor = 1193180 / 60;
+    outb(0x43, 0x36);
+    outb(0x40, divisor & 0xFF);
+    outb(0x40, divisor >> 8);
+}
+// ====================================================================
+
 namespace gfx {
     u32* fb = nullptr;
-    int W = 800;
-    int H = 600;
-    int pitch = 0;
-    static u32 back_buffer[800 * 600]; // Бэкбуфер под новое разрешение
+    int W = 640; int H = 480; int pitch = 0;
+    static u32 back_buffer[640 * 480];
 
     void init(multiboot_info* mb) {
         if (mb->flags & (1 << 12)) {
             fb = (u32*)(u32)mb->framebuffer_addr;
-            W = mb->framebuffer_width;
-            H = mb->framebuffer_height;
+            W = mb->framebuffer_width; H = mb->framebuffer_height;
             pitch = mb->framebuffer_pitch / 4;
         }
     }
-
     void put_pixel(int x, int y, u32 color) {
         if (x >= 0 && x < W && y >= 0 && y < H) back_buffer[y * W + x] = color;
     }
-
     void fill_rect(int x, int y, int w, int h, u32 color) {
-        if (x < 0) { w += x; x = 0; }
-        if (y < 0) { h += y; y = 0; }
-        if (x + w > W) w = W - x;
-        if (y + h > H) h = H - y;
+        if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
+        if (x + w > W) w = W - x; if (y + h > H) h = H - y;
         for (int j = 0; j < h; j++) {
             u32* row = &back_buffer[(y + j) * W + x];
             for (int i = 0; i < w; i++) row[i] = color;
         }
     }
-
     void draw_rect(int x, int y, int w, int h, u32 color) {
         fill_rect(x, y, w, 1, color); fill_rect(x, y + h - 1, w, 1, color);
         fill_rect(x, y, 1, h, color); fill_rect(x + w - 1, y, 1, h, color);
     }
+    void swap() { memcpy((void*)fb, back_buffer, W * H * 4); }
 
-    // Быстрое копирование через memcpy (v86 это очень любит)
-    void swap() {
-        memcpy((void*)fb, back_buffer, W * H * 4);
-    }
-
-    // Полный шрифт 8x8 (ASCII 32-127)
     static const u8 font8x8[96][8] = {
         {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},
         {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00}, {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00},
@@ -119,48 +153,37 @@ namespace gfx {
         int idx = c - 32;
         for (int j = 0; j < 8; j++) {
             u8 row = font8x8[idx][j];
-            for (int i = 0; i < 8; i++) {
-                if (row & (1 << (7 - i))) put_pixel(x + i, y + j, color); // Исправлен сдвиг битов
-            }
+            for (int i = 0; i < 8; i++) if (row & (1 << (7 - i))) put_pixel(x + i, y + j, color);
         }
     }
-
     void draw_text(int x, int y, const char* str, u32 color) {
         while (*str) { draw_char(x, y, *str++, color); x += 8; }
     }
 }
 
 namespace mouse {
-    int x = 400, y = 300;
+    int x = 320, y = 240;
     u8 btn = 0, pkt[3], idx = 0;
-
     void wait_w() { int t = 10000; while ((inb(0x64) & 2) && --t) {} }
     bool wait_r() { int t = 10000; while (!(inb(0x64) & 1) && --t) {} return t > 0; }
     void write(u8 v) { wait_w(); outb(0x64, 0xD4); wait_w(); outb(0x60, v); }
     u8   read()      { return wait_r() ? inb(0x60) : 0; }
-
     void init() {
-        wait_w(); outb(0x64, 0xA8);
-        wait_w(); outb(0x64, 0x20);
+        wait_w(); outb(0x64, 0xA8); wait_w(); outb(0x64, 0x20);
         u8 st = read(); st &= ~0x20;
         wait_w(); outb(0x64, 0x60); wait_w(); outb(0x60, st);
         write(0xF6); read(); write(0xF4); read();
     }
-
     bool feed(u8 b) {
         if (idx == 0 && !(b & 8)) return false;
         pkt[idx++] = b;
         if (idx < 3) return false;
         idx = 0;
-        
         int dx = pkt[1] - ((pkt[0] << 4) & 0x100);
         int dy = pkt[2] - ((pkt[0] << 3) & 0x100);
-        
-        x += dx; y -= dy; // Убрали множитель *2, в v86 он не нужен
-
+        x += dx; y -= dy; 
         if (x < 0) x = 0; if (x >= gfx::W) x = gfx::W - 1;
         if (y < 0) y = 0; if (y >= gfx::H) y = gfx::H - 1;
-
         btn = pkt[0] & 7;
         return true;
     }
@@ -182,21 +205,18 @@ static void draw_mouse_cursor(int mx, int my) {
 }
 
 static bool showWelcome = true;
-
 static void draw_desktop() {
     gfx::fill_rect(0, 0, gfx::W, gfx::H, 0x1A3C6C);
-    gfx::fill_rect(0, 0, gfx::W, 40, 0x2D2D2D);
-    gfx::draw_text(20, 16, "MinimalZero OS v0.5", 0xFFFFFF);
+    gfx::fill_rect(0, 0, gfx::W, 30, 0x2D2D2D);
+    gfx::draw_text(10, 11, "MinimalZero OS v0.6 (Fast)", 0xFFFFFF);
 
-    // Иконки
-    gfx::fill_rect(50, 100, 64, 64, 0xF0C040);
-    gfx::draw_text(50, 170, "Files", 0xFFFFFF);
-    gfx::fill_rect(50, 220, 64, 64, 0x40C0F0);
-    gfx::draw_text(50, 290, "Trash", 0xFFFFFF);
+    gfx::fill_rect(30, 60, 48, 48, 0xF0C040);
+    gfx::draw_text(30, 115, "Files", 0xFFFFFF);
+    gfx::fill_rect(30, 150, 48, 48, 0x40C0F0);
+    gfx::draw_text(30, 205, "Trash", 0xFFFFFF);
 
     if (showWelcome) {
-        int wx = 150, wy = 100, ww = 500, wh = 350; // Окно поменьше
-        
+        int wx = 120, wy = 80, ww = 400, wh = 300;
         gfx::fill_rect(wx + 5, wy + 5, ww, wh, 0x0A0A0A);
         gfx::fill_rect(wx, wy, ww, wh, 0xF0F0F0);
         gfx::fill_rect(wx, wy, ww, 30, 0x0078D7);
@@ -208,13 +228,10 @@ static void draw_desktop() {
             gfx::put_pixel(wx + ww - 20 + i, wy + 8 + i, 0xFFFFFF);
             gfx::put_pixel(wx + ww - 20 + i, wy + 17 - i, 0xFFFFFF);
         }
-
-        gfx::draw_text(wx + 20, wy + 60, "Hello, user! Welcome to your new GUI.", 0x000000);
-        gfx::draw_text(wx + 20, wy + 90, "This is 800x600 graphics.", 0x333333);
-        
+        gfx::draw_text(wx + 20, wy + 60, "Hello! Smooth rendering is ON.", 0x000000);
+        gfx::draw_text(wx + 20, wy + 90, "CPU sleeps 60 times per second.", 0x333333);
         gfx::draw_text(wx + 20, wy + 140, "How to use:", 0x000000);
         gfx::draw_text(wx + 20, wy + 170, "- Click [X] to close this window.", 0x444444);
-        gfx::draw_text(wx + 20, wy + 200, "- Use the VR Mouse pad on the screen.", 0x444444);
     }
 }
 
@@ -222,33 +239,35 @@ extern "C" void kmain(u32 magic, multiboot_info* mb) {
     if (magic != 0x2BADB002) for(;;);
     gfx::init(mb);
     mouse::init();
+    init_idt_pic_pit();
+    asm volatile("sti"); // Включаем прерывания для работы hlt
     
     u8 prev_btn = 0;
     
     for (;;) {
-        draw_desktop();
-        draw_mouse_cursor(mouse::x, mouse::y);
-        gfx::swap(); 
-        
-        // Обработка кликов
-        u8 current_btn = mouse::btn;
-        if ((current_btn & 1) && !(prev_btn & 1)) {
-            int mx = mouse::x;
-            int my = mouse::y;
-            if (showWelcome) {
-                int wx = 150, wy = 100, ww = 500;
-                if (mx >= wx + ww - 25 && mx <= wx + ww - 5 && my >= wy + 5 && my <= wy + 25) {
-                    showWelcome = false;
-                }
-            }
-        }
-        prev_btn = current_btn;
-        
-        // Читаем мышь (без тормозов)
+        // Опрос мыши
         u8 st = inb(0x64);
         if (st & 1) {
             u8 b = inb(0x60);
             if (st & 0x20) mouse::feed(b);
         }
+
+        // Отрисовка
+        draw_desktop();
+        draw_mouse_cursor(mouse::x, mouse::y);
+        gfx::swap();
+        
+        // Клики
+        u8 current_btn = mouse::btn;
+        if ((current_btn & 1) && !(prev_btn & 1)) {
+            int mx = mouse::x, my = mouse::y;
+            if (showWelcome) {
+                int wx = 120, wy = 80, ww = 400;
+                if (mx >= wx + ww - 25 && mx <= wx + ww - 5 && my >= wy + 5 && my <= wy + 25) showWelcome = false;
+            }
+        }
+        prev_btn = current_btn;
+        
+        asm volatile("hlt"); // СПИМ! Процессор просыпается от таймера (60 раз в секунду)
     }
 }
