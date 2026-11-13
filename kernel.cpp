@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Desktop, Keyboard Control & Mimi Clicker
+//  iMimi OS — Stable Desktop (Polling Mode)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -22,99 +22,33 @@ struct multiboot_info {
 
 #include "images.h"
 
-// --- IDT И ПРЕРЫВАНИЯ ---
-struct IDT_entry { u16 base_low; u16 sel; u8 zero; u8 flags; u16 base_high; } __attribute__((packed));
-struct IDT_ptr { u16 limit; u32 base; } __attribute__((packed));
-IDT_entry idt[256];
-IDT_ptr idtp;
-extern "C" void isr1();  // Клавиатура
-extern "C" void isr12(); // Мышь
-extern "C" void load_idt(u32);
-
 int mouse_x = 400, mouse_y = 300;
-u8 mouse_cycle = 0;
-u8 mouse_byte[3];
 bool mouse_left_clicked = false;
 
-// --- ОБРАБОТЧИК МЫШИ ---
-extern "C" void mouse_handler_c() {
-    u8 status = inb(0x64);
-    if (!(status & 0x20)) return;
-    u8 data = inb(0x60);
-    
-    switch(mouse_cycle) {
-        case 0: mouse_byte[0] = data; mouse_cycle++; break;
-        case 1: mouse_byte[1] = data; mouse_cycle++; break;
-        case 2: 
-            mouse_byte[2] = data; mouse_cycle = 0;
-            if (mouse_byte[0] & 0x10) mouse_x -= (256 - mouse_byte[1]); else mouse_x += mouse_byte[1];
-            if (mouse_byte[0] & 0x20) mouse_y -= (256 - mouse_byte[2]); else mouse_y += mouse_byte[2];
-            if (mouse_byte[0] & 0x01) mouse_left_clicked = true;
-            break;
+// --- БЕЗОПАСНОЕ ЧТЕНИЕ КЛАВИАТУРЫ (Без прерываний) ---
+void poll_keyboard() {
+    if (inb(0x64) & 1) { // Если есть нажатие
+        u8 scancode = inb(0x60);
+        
+        // Движение
+        if (scancode == 0x48 || scancode == 0x11) mouse_y -= 15; // Вверх / W
+        if (scancode == 0x50 || scancode == 0x1F) mouse_y += 15; // Вниз / S
+        if (scancode == 0x4B || scancode == 0x1E) mouse_x -= 15; // Влево / A
+        if (scancode == 0x4D || scancode == 0x20) mouse_x += 15; // Вправо / D
+        
+        // Клик
+        if (scancode == 0x1C || scancode == 0x39) mouse_left_clicked = true; // Enter / Space
+        
+        // Esc - выход в угол
+        if (scancode == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; }
     }
-    outb(0xA0, 0x20); outb(0x20, 0x20);
 }
 
-// --- ОБРАБОТЧИК КЛАВИАТУРЫ (Геймпад) ---
-extern "C" void keyboard_handler_c() {
-    u8 scancode = inb(0x60);
-    
-    // Управление стрелками или WASD
-    if (scancode == 0x48 || scancode == 0x11) mouse_y -= 15; // Вверх / W
-    if (scancode == 0x50 || scancode == 0x1F) mouse_y += 15; // Вниз / S
-    if (scancode == 0x4B || scancode == 0x1E) mouse_x -= 15; // Влево / A
-    if (scancode == 0x4D || scancode == 0x20) mouse_x += 15; // Вправо / D
-    
-    // Клик (Enter или Пробел)
-    if (scancode == 0x1C || scancode == 0x39) mouse_left_clicked = true;
-    
-    // Выход из игры (Esc)
-    if (scancode == 0x01) { mouse_left_clicked = true; mouse_x = 10; mouse_y = 10; } // Клик в левый верхний угол
-
-    outb(0x20, 0x20);
-}
-
-// Обертки ассемблера
-asm(".global isr1\n isr1:\n pusha\n call keyboard_handler_c\n popa\n iret\n");
-asm(".global isr12\n isr12:\n pusha\n call mouse_handler_c\n popa\n iret\n");
-
-void init_idt() {
-    idtp.limit = (sizeof(IDT_entry) * 256) - 1; idtp.base = (u32)&idt;
-    for(int i = 0; i < 256; i++) { 
-        idt[i].base_low = 0; idt[i].sel = 0; idt[i].zero = 0; idt[i].flags = 0; idt[i].base_high = 0; 
-    }
-    // Клавиатура IRQ 1
-    u32 base_kb = (u32)isr1;
-    idt[0x21].base_low = base_kb & 0xFFFF; idt[0x21].sel = 0x08; idt[0x21].flags = 0x8E; idt[0x21].base_high = (base_kb >> 16) & 0xFFFF;
-    
-    // Мышь IRQ 12
-    u32 base_ms = (u32)isr12;
-    idt[0x2C].base_low = base_ms & 0xFFFF; idt[0x2C].sel = 0x08; idt[0x2C].flags = 0x8E; idt[0x2C].base_high = (base_ms >> 16) & 0xFFFF;
-    
-    load_idt((u32)&idtp);
-}
-
-void init_pic() {
-    outb(0x20, 0x11); io_wait(); outb(0xA0, 0x11); io_wait();
-    outb(0x21, 0x20); io_wait(); outb(0xA1, 0x28); io_wait();
-    outb(0x21, 0x04); io_wait(); outb(0xA1, 0x02); io_wait();
-    outb(0x21, 0x01); io_wait(); outb(0xA1, 0x01); io_wait();
-    outb(0x21, 0x00); outb(0xA1, 0x00); 
-    outb(0x21, 0xF6); // Включаем IRQ1 (клавиатура) и IRQ2
-    outb(0xA1, 0xEF); // Включаем IRQ12 (мышь)
-}
-
-void init_mouse() {
-    outb(0x64, 0xA8); outb(0x64, 0x20); io_wait();
-    u8 status = inb(0x60) | 2; outb(0x64, 0x60); io_wait();
-    outb(0x60, status); outb(0x64, 0xD4); outb(0x60, 0xF4);
-}
-
-// --- ЧТЕНИЕ ВРЕМЕНИ (RTC) ---
+// --- БЕЗОПАСНОЕ ЧТЕНИЕ ВРЕМЕНИ ---
 u8 get_rtc_reg(u8 reg) { outb(0x70, reg); return inb(0x71); }
 u8 bcd_to_bin(u8 val) { return (val & 0x0F) + ((val / 16) * 10); }
 void get_time(char* buffer) {
-    while (get_rtc_reg(0x0A) & 0x80); // Ждем обновления
+    // Убрали цикл ожидания, который вешал v86
     u8 hour = bcd_to_bin(get_rtc_reg(0x04));
     u8 min  = bcd_to_bin(get_rtc_reg(0x02));
     
@@ -229,74 +163,69 @@ void draw_string(const char* s, int x, int y, u32 color) {
 //  ОСНОВНАЯ ЛОГИКА
 // ============================================================
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
-    (void)magic; gfx::init(mb); init_idt(); init_pic(); init_mouse(); asm volatile("sti");
-
-    int state = 0; // 0 = Boot, 1 = Desktop, 2 = Game
+    (void)magic; 
+    gfx::init(mb); 
+    // Мы БОЛЬШЕ НЕ ВКЛЮЧАЕМ прерывания (sti), работаем через опрос!
+    
+    int state = 0; 
     int current_mimi = 0; 
     int clicker_squish = 100; 
     int clicker_dir = 0;     
 
     while (1) {
-        bool click = mouse_left_clicked; mouse_left_clicked = false;
+        poll_keyboard(); // Опрашиваем клавиатуру вручную
+        bool click = mouse_left_clicked; 
+        mouse_left_clicked = false;
 
-        // Ограничиваем мышку экраном
         if (mouse_x < 0) mouse_x = 0; if (mouse_x > 799) mouse_x = 799;
         if (mouse_y < 0) mouse_y = 0; if (mouse_y > 599) mouse_y = 599;
 
         if (state == 0) {
-            // ЗАГРУЗКА
             gfx::fill_screen(0xFFFFFF); 
             gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 100);
             gfx::draw_circle(400, 500, 20, 0xDDDDDD);
-            for(volatile int i=0; i<100000000; i++);
-            state = 1; gfx::fill_screen(0x1A1A2E); 
+            for(volatile int i=0; i<50000000; i++); // Чуть уменьшили паузу
+            state = 1; 
         } 
         else if (state == 1) {
-            // РАБОЧИЙ СТОЛ
             gfx::fill_screen(0x1A1A2E); 
 
             // Верхняя панель
             gfx::fill_rect(0, 0, 800, 30, 0x111122);
             char time_str[8];
             get_time(time_str);
-            draw_string(time_str, 20, 10, 0xFFFFFF); // Время слева
-            draw_string("АВТО", 700, 10, 0x00FF00); // Статус авто
-            draw_string("English", 750, 10, 0xAAAAAA); // Язык
+            draw_string(time_str, 20, 10, 0xFFFFFF);
+            draw_string("АВТО", 700, 10, 0x00FF00); 
+            draw_string("English", 750, 10, 0xAAAAAA); 
 
             // Иконка игры
             int ix = 50, iy = 70, iw = 80, ih = 80;
             bool is_hover = (mouse_x >= ix && mouse_x <= ix + iw && mouse_y >= iy && mouse_y <= iy + ih);
 
             if (is_hover) {
-                // Если наведено - иконка опускается
-                gfx::fill_rect(ix + 4, iy + 4, iw, ih, 0x3498DB); // Тень/смещение
+                gfx::fill_rect(ix + 4, iy + 4, iw, ih, 0x3498DB); // Сдвиг вниз
                 draw_string("Mimi Clicker", ix - 10, iy + 90, 0xFFFFFF);
                 
-                // Инфо-панель справа
+                // Инфо-панель
                 gfx::fill_rect(200, 70, 500, 150, 0x222233);
                 draw_string("Creator: Hayrulla004004_Dev (His Fan TYPH)", 220, 90, 0xFFFFFF);
                 draw_string("App Version: 1.0.2", 220, 120, 0xAAAAAA);
             } else {
-                // Обычное состояние
                 gfx::fill_rect(ix, iy, iw, ih, 0x3498DB);
                 draw_string("Mimi Clicker", ix - 10, iy + 90, 0xFFFFFF);
             }
-            
             draw_string("Mimi", ix + 20, iy + 35, 0xFFFFFF);
 
-            // Клик по иконке (с учетом смещения)
             if (click && mouse_x >= ix && mouse_x <= ix + iw && mouse_y >= iy && mouse_y <= iy + ih) {
                 state = 2;
             }
         } 
         else if (state == 2) {
-            // ИГРА MIMI CLICKER
             gfx::fill_screen(0xFFFFFF); 
             
             draw_string("Mimi Clicker", 350, 30, 0x000000);
             draw_string("[ESC] to exit", 700, 30, 0xAAAAAA);
             
-            // Кнопки
             gfx::fill_rect(50, 520, 150, 40, 0xEEEEEE);
             draw_string("Mini", 100, 535, 0x000000);
             gfx::fill_rect(250, 520, 150, 40, 0xEEEEEE);
@@ -308,30 +237,25 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) current_mimi = 0;
                 if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 560) current_mimi = 1;
                 if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 560) current_mimi = 2;
-                if (mouse_x < 40 && mouse_y < 40) state = 1; // Выход
+                if (mouse_x < 40 && mouse_y < 40) state = 1; 
             }
 
             int ox = 0, oy = 0, draw_w = 0, draw_h = 0;
             if (current_mimi == 0) {
-                draw_h = 250 * clicker_squish / 100;
-                draw_w = img_base_w * draw_h / img_base_h;
+                draw_h = 250 * clicker_squish / 100; draw_w = img_base_w * draw_h / img_base_h;
                 gfx::draw_image_centered(250, img_base_rle, img_base_size, img_base_w, img_base_h, clicker_squish);
             } else if (current_mimi == 1) {
-                draw_h = 250 * clicker_squish / 100;
-                draw_w = img_adult_w * draw_h / img_adult_h;
+                draw_h = 250 * clicker_squish / 100; draw_w = img_adult_w * draw_h / img_adult_h;
                 gfx::draw_image_centered(250, img_adult_rle, img_adult_size, img_adult_w, img_adult_h, clicker_squish);
             } else {
-                draw_h = 250 * clicker_squish / 100;
-                draw_w = img_cool_w * draw_h / img_cool_h;
+                draw_h = 250 * clicker_squish / 100; draw_w = img_cool_w * draw_h / img_cool_h;
                 gfx::draw_image_centered(250, img_cool_rle, img_cool_size, img_cool_w, img_cool_h, clicker_squish);
             }
 
-            ox = (800 - draw_w) / 2;
-            oy = (600 - draw_h) / 2 - 30;
+            ox = (800 - draw_w) / 2; oy = (600 - draw_h) / 2 - 30;
 
             if (click && mouse_x >= ox && mouse_x <= ox + draw_w && mouse_y >= oy && mouse_y <= oy + draw_h) {
-                clicker_squish = 80; 
-                clicker_dir = 1;    
+                clicker_squish = 80; clicker_dir = 1;    
             }
 
             if (clicker_dir == 1) {
@@ -341,7 +265,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             }
         }
 
-        // Курсор (Красный квадрат)
+        // Курсор
         gfx::fill_rect(mouse_x, mouse_y, 5, 5, 0xFF0000);
     }
 }
