@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
-# Скачивает splash-картинку из GitHub. Идемпотентно (кэширует).
 set -euo pipefail
 
-URL="https://raw.githubusercontent.com/hayrxdevofficial/Mimi-Typh-App-IDK/main/Assets.xcassets/AppIcon.appiconset/IMG_1710.jpeg"
-OUT="${1:-boot_image.jpg}"
+URL_BASE="https://raw.githubusercontent.com/hayrxdevofficial/Mimi-Typh-App-IDK/main/Assets.xcassets/AppIcon.appiconset/IMG_1710.jpeg"
+URL_ADULT="https://raw.githubusercontent.com/hayrxdevofficial/Mimi-Typh-App-IDK/main/mimi.imageset/IMG_1711.jpeg"
+URL_COOL="https://raw.githubusercontent.com/hayrxdevofficial/Mimi-Typh-App-IDK/main/mimi.imageset/IMG_1748.jpeg"
 
-if [[ -f "$OUT" ]]; then
-    echo "[fetch_splash] $OUT уже есть, пропускаю"
-    exit 0
-fi
+fetch() {
+    local url="$1"
+    local out="$2"
+    if [[ ! -f "$out" ]]; then
+        echo "[fetch] Скачиваю $out..."
+        curl -fsSL -o "$out" "$url"
+    fi
+}
 
-echo "[fetch_splash] скачиваю $URL"
-if command -v curl >/dev/null; then
-    curl -fL --retry 3 -o "$OUT" "$URL"
-elif command -v wget >/dev/null; then
-    wget -O "$OUT" "$URL"
-else
-    echo "Нужен curl или wget" >&2; exit 1
-fi
-
-# Проверка, что это действительно JPEG
-if ! file "$OUT" | grep -qi jpeg; then
-    echo "Ошибка: скачался не JPEG" >&2; exit 1
-fi
-echo "[fetch_splash] готово: $(du -h "$OUT" | cut -f1)"
+fetch "$URL_BASE" "img_base.jpg"
+fetch "$URL_ADULT" "img_adult.jpg"
+fetch "$URL_COOL" "img_cool.jpg"
+echo "[fetch] Все картинки готовы."
