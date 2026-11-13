@@ -1,53 +1,56 @@
-name: build
-on: [push, workflow_dispatch]
+name: Build MinimalZero OS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:   # позволяет запускать вручную из вкладки Actions
 
 jobs:
-  iso:
+  build:
+    name: Build on Ubuntu
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # 1) Системные пакеты: GRUB, xorriso, python, утилиты
-      - name: Install system packages
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            wget unzip curl file \
-            python3 python3-pip \
-            grub-pc-bin grub-common \
-            xorriso mtools
+            build-essential \
+            gcc-multilib \
+            g++-multilib \
+            nasm \
+            grub-pc-bin \
+            grub-common \
+            xorriso \
+            mtools \
+            dosfstools \
+            make \
+            binutils \
+            python3 python3-pip
+          pip3 install --quiet --break-system-packages Pillow
 
-      # 2) Pillow для tools/img2c.py
-      - name: Install Python dependencies
-        run: pip3 install --quiet --break-system-packages Pillow
-
-      # 3) Кросс-тулчейн i686-elf (то, чего не хватало)
-      - name: Install i686-elf cross toolchain
-        run: |
-          wget -q https://github.com/lordmilko/i686-elf-tools/releases/download/7.1.0/i686-elf-tools-linux.zip
-          sudo unzip -q i686-elf-tools-linux.zip -d /usr/local
-          rm i686-elf-tools-linux.zip
-          echo "--- versions ---"
-          i686-elf-as --version | head -1
-          i686-elf-gcc --version | head -1
-          i686-elf-ld --version | head -1
-
-      # 4) Санити-чек: все ли бинарники на месте
       - name: Verify toolchain
         run: |
-          for t in i686-elf-as i686-elf-g++ i686-elf-ld grub-mkrescue xorriso; do
-            command -v "$t" >/dev/null || { echo "MISSING: $t"; exit 1; }
-          done
+          g++ --version
+          nasm -v
+          grub-mkrescue --version
 
-      # 5) Сборка iMimi (включает fetch → resize → RLE → ISO)
-      - name: Build ISO
-        run: make
+      - name: Build
+        run: |
+          make clean
+          make
 
-      # 6) Загрузить артефакт
-      - name: Upload ISO artifact
+      - name: Check artifacts
+        run: |
+          ls -lh kernel.bin || echo "kernel.bin not found!"
+          ls -lh *.iso || echo "ISO not found!"
+
+      - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
           name: imimi-iso
-          path: imimi.iso
+          path: "*.iso"
           if-no-files-found: error
