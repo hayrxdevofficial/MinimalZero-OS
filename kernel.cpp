@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Stable Desktop (Polling Mode)
+//  iMimi OS — Smooth Desktop (Double Buffered, Fixed RLE)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -9,7 +9,6 @@ typedef unsigned long long  u64;
 
 static inline void outb(u16 p, u8 v) { asm volatile("outb %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u8   inb(u16 p)       { u8 v; asm volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
-static inline void io_wait()        { outb(0x80, 0); }
 
 struct multiboot_info {
     u32 flags; u32 mem_lower, mem_upper; u32 boot_device, cmdline, mods_count, mods_addr;
@@ -25,74 +24,54 @@ struct multiboot_info {
 int mouse_x = 400, mouse_y = 300;
 bool mouse_left_clicked = false;
 
-// --- БЕЗОПАСНОЕ ЧТЕНИЕ КЛАВИАТУРЫ (Без прерываний) ---
+// --- БЕЗОПАСНЫЙ ОПРОС КЛАВИАТУРЫ ---
 void poll_keyboard() {
-    if (inb(0x64) & 1) { // Если есть нажатие
+    if (inb(0x64) & 1) { 
         u8 scancode = inb(0x60);
-        
-        // Движение
-        if (scancode == 0x48 || scancode == 0x11) mouse_y -= 15; // Вверх / W
-        if (scancode == 0x50 || scancode == 0x1F) mouse_y += 15; // Вниз / S
-        if (scancode == 0x4B || scancode == 0x1E) mouse_x -= 15; // Влево / A
-        if (scancode == 0x4D || scancode == 0x20) mouse_x += 15; // Вправо / D
-        
-        // Клик
-        if (scancode == 0x1C || scancode == 0x39) mouse_left_clicked = true; // Enter / Space
-        
-        // Esc - выход в угол
-        if (scancode == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; }
+        if (scancode == 0x48 || scancode == 0x11) mouse_y -= 15; // Вверх
+        if (scancode == 0x50 || scancode == 0x1F) mouse_y += 15; // Вниз
+        if (scancode == 0x4B || scancode == 0x1E) mouse_x -= 15; // Влево
+        if (scancode == 0x4D || scancode == 0x20) mouse_x += 15; // Вправо
+        if (scancode == 0x1C || scancode == 0x39) mouse_left_clicked = true; // Enter/Space
+        if (scancode == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; } // Esc
     }
 }
 
-// --- БЕЗОПАСНОЕ ЧТЕНИЕ ВРЕМЕНИ ---
-u8 get_rtc_reg(u8 reg) { outb(0x70, reg); return inb(0x71); }
-u8 bcd_to_bin(u8 val) { return (val & 0x0F) + ((val / 16) * 10); }
-void get_time(char* buffer) {
-    // Убрали цикл ожидания, который вешал v86
-    u8 hour = bcd_to_bin(get_rtc_reg(0x04));
-    u8 min  = bcd_to_bin(get_rtc_reg(0x02));
-    
-    buffer[0] = '0' + (hour / 10); buffer[1] = '0' + (hour % 10);
-    buffer[2] = ':';
-    buffer[3] = '0' + (min / 10);  buffer[4] = '0' + (min % 10);
-    buffer[5] = '\0';
-}
-
-// --- ГРАФИКА ---
+// --- ГРАФИКА (ДВОЙНАЯ БУФЕРИЗАЦИЯ) ---
 namespace gfx {
-    static u8* fb = nullptr; static u32 W = 800, H = 600, pitch = 0; static u8 bpp = 32;
+    static u8* fb = nullptr; 
+    static u32 W = 800, H = 600, pitch = 0; 
+    static u8 bpp = 32;
+    
+    // Буфер в памяти (1.8 МБ). Рисуем сначала сюда.
+    static u32 back_buffer[800 * 600]; 
+
     void init(multiboot_info* mb) {
         if (mb->flags & (1u << 12)) {
-            fb = (u8*)(u32)mb->framebuffer_addr; W = mb->framebuffer_width; H = mb->framebuffer_height;
+            fb = (u8*)(u32)mb->framebuffer_addr; 
+            W = mb->framebuffer_width; H = mb->framebuffer_height;
             pitch = mb->framebuffer_pitch; bpp = mb->framebuffer_bpp;
         }
     }
+
+    // Рисуем в буфер памяти
     inline void put_pixel(u32 x, u32 y, u32 color) {
-        if (x >= W || y >= H || !fb) return;
-        if (bpp == 32) *(u32*)(fb + y * pitch + x * 4) = color;
+        if (x >= W || y >= H) return;
+        back_buffer[y * W + x] = color;
     }
+
     void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) {
         for (u32 j = 0; j < h; j++) for (u32 i = 0; i < w; i++) put_pixel(x + i, y + j, color);
     }
+    
     void fill_screen(u32 color) { fill_rect(0, 0, W, H, color); }
-
-    void draw_circle(int cx, int cy, int r, u32 color) {
-        int x = r, y = 0, err = 0;
-        while (x >= y) {
-            put_pixel(cx + x, cy + y, color); put_pixel(cx + y, cy + x, color);
-            put_pixel(cx - y, cy + x, color); put_pixel(cx - x, cy + y, color);
-            put_pixel(cx - x, cy - y, color); put_pixel(cx - y, cy - x, color);
-            put_pixel(cx + y, cy - x, color); put_pixel(cx + x, cy - y, color);
-            if (err <= 0) { y += 1; err += 2*y + 1; }
-            if (err > 0) { x -= 1; err -= 2*x + 1; }
-        }
-    }
 
     inline u32 rgb565_to_888(u16 c) {
         u8 r = ((c >> 11) & 0x1F) * 255 / 31; u8 g = ((c >> 5) & 0x3F) * 255 / 63; u8 b = (c & 0x1F) * 255 / 31;
         return (r << 16) | (g << 8) | b;
     }
 
+    // ИСПРАВЛЕННЫЙ ДЕКОДЕР (теперь картинки будут нормальными)
     void draw_image_centered(int target_h, const u16* rle, u32 rle_size, int img_w, int img_h, int squish_percent) {
         int draw_h = (target_h * squish_percent) / 100;
         int draw_w = (img_w * draw_h) / img_h; 
@@ -102,20 +81,41 @@ namespace gfx {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < rle_size) {
             u16 header = rle[idx++];
-            u32 len = (header & 0x8000) ? (header & 0x7FFF) : header;
-            for (u32 i = 0; i < len; i++) {
+            if (header & 0x8000) {
+                // Это серия (Run). Читаем цвет ОДИН раз.
+                u32 len = header & 0x7FFF;
                 u32 col = rgb565_to_888(rle[idx++]);
-                int px = ox + (x * draw_w) / img_w;
-                int py = oy + (y * draw_h) / img_h;
-                put_pixel(px, py, col);
-                if (++x >= img_w) { x = 0; y++; }
+                for (u32 i = 0; i < len; i++) {
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
+            } else {
+                // Это буквальные пиксели. Читаем каждый цвет.
+                u32 len = header;
+                for (u32 i = 0; i < len; i++) {
+                    u32 col = rgb565_to_888(rle[idx++]);
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
+            }
+        }
+    }
+
+    // Вывод готового кадра на экран (вызывается в конце каждого цикла)
+    void swap() {
+        if (!fb) return;
+        u32* dest = (u32*)fb;
+        u32 p32 = pitch / 4;
+        for (u32 y = 0; y < H; y++) {
+            for (u32 x = 0; x < W; x++) {
+                dest[y * p32 + x] = back_buffer[y * W + x];
             }
         }
     }
 }
 
 // --- ШРИФТ ---
-static const u8 font8x8[95][8] = { /* Твой массив шрифта */ 
+static const u8 font8x8[95][8] = { 
     {0,0,0,0,0,0,0,0},{0x18,0x18,0x18,0x18,0,0,0x18,0},{0x6C,0x6C,0x6C,0,0,0,0,0},{0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0},
     {0x18,0x7E,0xC0,0x7C,0x06,0xFC,0x18,0},{0,0xC6,0xCC,0x18,0x30,0x66,0xC6,0},{0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0},
     {0x18,0x18,0x30,0,0,0,0,0},{0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0},{0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0},
@@ -159,13 +159,41 @@ void draw_string(const char* s, int x, int y, u32 color) {
     }
 }
 
+// --- КРАСИВАЯ МЫШКА (Стрелочка) ---
+void draw_cursor(int x, int y) {
+    // 1 = черный контур, 2 = белая заливка
+    static const u8 cursor[16][12] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0},
+        {1,2,2,2,1,0,0,0,0,0,0,0},
+        {1,2,2,2,2,1,0,0,0,0,0,0},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,2,2,2,2,1,0,0,0,0},
+        {1,2,2,2,2,2,2,2,1,0,0,0},
+        {1,2,2,2,2,2,2,2,2,1,0,0},
+        {1,2,2,2,2,1,1,1,1,1,1,0},
+        {1,2,1,2,2,1,0,0,0,0,0,0},
+        {1,1,0,1,2,2,1,0,0,0,0,0},
+        {1,0,0,0,1,2,2,1,0,0,0,0},
+        {0,0,0,0,1,2,2,1,0,0,0,0},
+        {0,0,0,0,0,1,1,0,0,0,0,0}
+    };
+    for (int j = 0; j < 16; j++) {
+        for (int i = 0; i < 12; i++) {
+            if (cursor[j][i] == 1) gfx::put_pixel(x + i, y + j, 0x000000); // Черный
+            if (cursor[j][i] == 2) gfx::put_pixel(x + i, y + j, 0xFFFFFF); // Белый
+        }
+    }
+}
+
 // ============================================================
 //  ОСНОВНАЯ ЛОГИКА
 // ============================================================
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
     (void)magic; 
     gfx::init(mb); 
-    // Мы БОЛЬШЕ НЕ ВКЛЮЧАЕМ прерывания (sti), работаем через опрос!
     
     int state = 0; 
     int current_mimi = 0; 
@@ -173,7 +201,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     int clicker_dir = 0;     
 
     while (1) {
-        poll_keyboard(); // Опрашиваем клавиатуру вручную
+        poll_keyboard(); 
         bool click = mouse_left_clicked; 
         mouse_left_clicked = false;
 
@@ -183,8 +211,10 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         if (state == 0) {
             gfx::fill_screen(0xFFFFFF); 
             gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 100);
-            gfx::draw_circle(400, 500, 20, 0xDDDDDD);
-            for(volatile int i=0; i<50000000; i++); // Чуть уменьшили паузу
+            gfx::swap(); // Показываем загрузку
+            
+            // Имитация загрузки
+            for(volatile int i=0; i<100000000; i++);
             state = 1; 
         } 
         else if (state == 1) {
@@ -192,9 +222,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
 
             // Верхняя панель
             gfx::fill_rect(0, 0, 800, 30, 0x111122);
-            char time_str[8];
-            get_time(time_str);
-            draw_string(time_str, 20, 10, 0xFFFFFF);
+            draw_string("12:00", 20, 10, 0xFFFFFF); // Фиксированное время, чтобы не висло
             draw_string("АВТО", 700, 10, 0x00FF00); 
             draw_string("English", 750, 10, 0xAAAAAA); 
 
@@ -203,7 +231,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             bool is_hover = (mouse_x >= ix && mouse_x <= ix + iw && mouse_y >= iy && mouse_y <= iy + ih);
 
             if (is_hover) {
-                gfx::fill_rect(ix + 4, iy + 4, iw, ih, 0x3498DB); // Сдвиг вниз
+                gfx::fill_rect(ix + 4, iy + 4, iw, ih, 0x3498DB); 
                 draw_string("Mimi Clicker", ix - 10, iy + 90, 0xFFFFFF);
                 
                 // Инфо-панель
@@ -226,6 +254,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("Mimi Clicker", 350, 30, 0x000000);
             draw_string("[ESC] to exit", 700, 30, 0xAAAAAA);
             
+            // Кнопки
             gfx::fill_rect(50, 520, 150, 40, 0xEEEEEE);
             draw_string("Mini", 100, 535, 0x000000);
             gfx::fill_rect(250, 520, 150, 40, 0xEEEEEE);
@@ -261,11 +290,16 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             if (clicker_dir == 1) {
                 clicker_squish += 1;
                 if (clicker_squish >= 100) { clicker_squish = 100; clicker_dir = 0; }
-                for(volatile int i=0; i<2000000; i++); 
             }
         }
 
-        // Курсор
-        gfx::fill_rect(mouse_x, mouse_y, 5, 5, 0xFF0000);
+        // Рисуем красивую мышку поверх всего кадра
+        draw_cursor(mouse_x, mouse_y);
+
+        // ВЫВОДИМ КАДР НА ЭКРАН (Все мерцание исчезнет)
+        gfx::swap();
+        
+        // Небольшая пауза, чтобы v86 не перегревался
+        for(volatile int i=0; i<1000000; i++);
     }
 }
