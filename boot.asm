@@ -3,15 +3,13 @@ bits 32
 section .multiboot
 align 4
     dd 0x1BADB002               ; magic
-    dd 0x00000007               ; flags (ALIGN | MEMINFO | VIDEO)
+    dd 0x00000007               ; flags
     dd -(0x1BADB002 + 0x00000007) ; checksum
-    ; aout kludge
     dd 0, 0, 0, 0, 0
-    ; video mode request
-    dd 0                        ; linear graphics mode
-    dd 800                      ; width
-    dd 600                      ; height
-    dd 32                       ; bpp
+    dd 0
+    dd 800
+    dd 600
+    dd 32
 
 section .bss
 align 16
@@ -23,13 +21,18 @@ section .text
 global _start
 extern kmain
 
+; --- НОВАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ IDT ---
+global load_idt
+load_idt:
+    mov eax, [esp + 4]  ; берем аргумент из стека (указатель на IDT)
+    lidt [eax]          ; загружаем IDT
+    ret
+
 _start:
     cli
     mov esp, stack_top
-    
-    ; Передаем аргументы для kmain(mb, magic)
-    push eax                    ; magic
-    push ebx                    ; mb (multiboot info)
+    push eax
+    push ebx
     call kmain
 
 hang:
