@@ -1,22 +1,11 @@
 // ============================================================
-//  iMimi OS — Kernel (Optimized for v86 Emulator)
+//  iMimi OS — v86-compatible Kernel
 // ============================================================
 
 typedef unsigned char       u8;
 typedef unsigned short      u16;
 typedef unsigned int        u32;
 typedef unsigned long long  u64;
-
-extern "C" void* memcpy(void* d, const void* s, u32 n) {
-    u8* a = (u8*)d; const u8* b = (const u8*)s;
-    while (n--) *a++ = *b++;
-    return d;
-}
-extern "C" void* memset(void* d, int v, u32 n) {
-    u8* a = (u8*)d;
-    while (n--) *a++ = (u8)v;
-    return d;
-}
 
 struct multiboot_info {
     u32 flags;
@@ -38,156 +27,99 @@ struct multiboot_info {
 
 #include "splash.h"
 
-// ============================================================
-//  gfx — программный композитор
-// ============================================================
 namespace gfx {
-    u8*  fb     = nullptr;
-    u32  W      = 800;
-    u32  H      = 600;
-    u32  pitch  = 0;
-    u8   bpp    = 32;
-
-    // Бэкбуфер (всегда 32-бит для простоты математики)
-    static u32 back_buffer[800 * 600];
+    static u8* fb       = nullptr;
+    static u32 W        = 800;
+    static u32 H        = 600;
+    static u32 pitch    = 0;
+    static u8  bpp      = 32;
 
     void init(multiboot_info* mb) {
         if (mb->flags & (1u << 12)) {
-            fb     = (u8*)(u32)mb->framebuffer_addr;
-            W      = mb->framebuffer_width;
-            H      = mb->framebuffer_height;
-            pitch  = mb->framebuffer_pitch;
-            bpp    = mb->framebuffer_bpp;
-            if (W == 0 || W > 800) W = 800;
-            if (H == 0 || H > 600) H = 600;
-        }
-        memset(back_buffer, 0, sizeof(back_buffer));
-    }
-
-    inline void put_pixel(int x, int y, u32 color) {
-        if ((unsigned)x < W && (unsigned)y < H)
-            back_buffer[y * W + x] = color;
-    }
-
-    void fill_rect(int x, int y, int w, int h, u32 color) {
-        if (x < 0) { w += x; x = 0; }
-        if (y < 0) { h += y; y = 0; }
-        if (x + w > (int)W) w = W - x;
-        if (y + h > (int)H) h = H - y;
-        if (w <= 0 || h <= 0) return;
-        for (int j = 0; j < h; j++) {
-            u32* row = &back_buffer[(y + j) * W + x];
-            for (int i = 0; i < w; i++) row[i] = color;
+            fb    = (u8*)(u32)mb->framebuffer_addr;
+            W     = mb->framebuffer_width;
+            H     = mb->framebuffer_height;
+            pitch = mb->framebuffer_pitch;
+            bpp   = mb->framebuffer_bpp;
         }
     }
 
-    void draw_rect(int x, int y, int w, int h, u32 color) {
-        fill_rect(x, y, w, 1, color); fill_rect(x, y + h - 1, w, 1, color);
-        fill_rect(x, y, 1, h, color); fill_rect(x + w - 1, y, 1, h, color);
+    inline void put_pixel(u32 x, u32 y, u32 color) {
+        if (x >= W || y >= H || !fb) return;
+        if (bpp == 32) {
+            *(u32*)(fb + y * pitch + x * 4) = color;
+        } else if (bpp == 24) {
+            u8* p = fb + y * pitch + x * 3;
+            p[0] = color & 0xFF; p[1] = (color >> 8) & 0xFF; p[2] = (color >> 16) & 0xFF;
+        } else if (bpp == 16) {
+            u16 r = (color >> 19) & 0x1F; u16 g = (color >> 10) & 0x3F; u16 b = (color >> 3) & 0x1F;
+            *(u16*)(fb + y * pitch + x * 2) = (r << 11) | (g << 5) | b;
+        }
     }
 
-    // Быстрое альфа-смешивание (вместо тяжелого blur)
-    void blend_rect(int x, int y, int w, int h, u32 color, u8 alpha) {
-        for (int j = 0; j < h; j++) {
-            for (int i = 0; i < w; i++) {
-                int px = x + i, py = y + j;
-                if ((unsigned)px >= W || (unsigned)py >= H) continue;
-                u32 dst = back_buffer[py * W + px];
+    void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) {
+        for (u32 j = 0; j < h; j++)
+            for (u32 i = 0; i < w; i++)
+                put_pixel(x + i, y + j, color);
+    }
+
+    void fill_screen(u32 color) { fill_rect(0, 0, W, H, color); }
+
+    void blend_rect(u32 x, u32 y, u32 w, u32 h, u32 color, u8 alpha) {
+        for (u32 j = 0; j < h; j++) {
+            for (u32 i = 0; i < w; i++) {
+                u32 px = x + i, py = y + j;
+                if (px >= W || py >= H || !fb) continue;
+                u32 dst = 0;
+                if (bpp == 32) dst = *(u32*)(fb + py * pitch + px * 4);
+                else if (bpp == 24) { u8* p = fb + py * pitch + px * 3; dst = p[0] | (p[1]<<8) | (p[2]<<16); }
+                else { u16 c = *(u16*)(fb + py * pitch + px * 2); dst = (((c>>11)&0x1F)*8 << 16) | (((c>>5)&0x3F)*4 << 8) | ((c&0x1F)*8); }
+                
                 u8 dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
                 u8 sr = (color >> 16) & 0xFF, sg = (color >> 8) & 0xFF, sb = color & 0xFF;
                 u8 r = (u8)((sr * alpha + dr * (255 - alpha)) / 255);
                 u8 g = (u8)((sg * alpha + dg * (255 - alpha)) / 255);
                 u8 b = (u8)((sb * alpha + db * (255 - alpha)) / 255);
-                back_buffer[py * W + px] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                put_pixel(px, py, (r << 16) | (g << 8) | b);
             }
         }
     }
 
-    void gradient_rect(int x, int y, int w, int h, u32 top, u32 bottom, u8 alpha) {
-        if (h <= 0) return;
-        for (int j = 0; j < h; j++) {
-            u8 t = (u8)((j * 255) / (h > 1 ? h - 1 : 1));
-            u8 r = (u8)(((top    >> 16) & 0xFF) * (255 - t) / 255 + ((bottom    >> 16) & 0xFF) * t / 255);
-            u8 g = (u8)(((top    >>  8) & 0xFF) * (255 - t) / 255 + ((bottom    >>  8) & 0xFF) * t / 255);
-            u8 b = (u8)(( top           & 0xFF) * (255 - t) / 255 + ( bottom           & 0xFF) * t / 255);
-            blend_rect(x, y + j, w, 1, (u32)((r << 16) | (g << 8) | b), alpha);
-        }
+    inline u32 rgb565_to_888(u16 c) {
+        u8 r = ((c >> 11) & 0x1F) * 255 / 31;
+        u8 g = ((c >> 5) & 0x3F) * 255 / 63;
+        u8 b = (c & 0x1F) * 255 / 31;
+        return (r << 16) | (g << 8) | b;
     }
 
-    inline u32 rgb565_to_rgb888(u16 c) {
-        u8 r = (u8)(((c >> 11) & 0x1F) * 255 / 31);
-        u8 g = (u8)(((c >>  5) & 0x3F) * 255 / 63);
-        u8 b = (u8)(( c        & 0x1F) * 255 / 31);
-        return 0xFF000000u | ((u32)r << 16) | ((u32)g << 8) | b;
-    }
-
-    void draw_splash_rle() {
-        int ox = (W - (int)splash_w) / 2;
-        int oy = (H - (int)splash_h) / 2;
-        fill_rect(0, 0, W, H, 0xFF000000);
-        u32 idx = 0, x = 0, y = 0;
+    void draw_splash() {
+        fill_screen(0);
+        int ox = ((int)W - (int)splash_w) / 2;
+        int oy = ((int)H - (int)splash_h) / 2;
+        u32 idx = 0; int x = 0, y = 0;
         while (idx < splash_rle_size) {
             u16 header = splash_rle[idx++];
             if (header & 0x8000) {
-                u32 len = header & 0x7FFF;
-                u32 col = rgb565_to_rgb888(splash_rle[idx++]);
+                u32 len = header & 0x7FFF; u32 col = rgb565_to_888(splash_rle[idx++]);
                 for (u32 i = 0; i < len; i++) {
-                    put_pixel(ox + x, oy + y, col);
-                    if (++x >= splash_w) { x = 0; y++; }
+                    int px = ox + x, py = oy + y;
+                    if (px >= 0 && px < (int)W && py >= 0 && py < (int)H) put_pixel(px, py, col);
+                    if (++x >= (int)splash_w) { x = 0; y++; }
                 }
             } else {
                 u32 len = header;
                 for (u32 i = 0; i < len; i++) {
-                    u32 col = rgb565_to_rgb888(splash_rle[idx++]);
-                    put_pixel(ox + x, oy + y, col);
-                    if (++x >= splash_w) { x = 0; y++; }
-                }
-            }
-        }
-    }
-
-    // Универсальный вывод (поддержка 16, 24, 32 bpp для v86)
-    void swap() {
-        if (!fb) return;
-        u32* fb32 = (u32*)fb;
-        u16* fb16 = (u16*)fb;
-        u8*  fb24 = fb;
-        u32 p32 = pitch / 4;
-        u32 p16 = pitch / 2;
-
-        for (u32 y = 0; y < H; y++) {
-            for (u32 x = 0; x < W; x++) {
-                u32 color = back_buffer[y * W + x];
-                if (bpp == 32) {
-                    fb32[y * p32 + x] = color;
-                } else if (bpp == 24) {
-                    u32 idx = y * pitch + x * 3;
-                    fb24[idx + 0] = color & 0xFF;
-                    fb24[idx + 1] = (color >> 8) & 0xFF;
-                    fb24[idx + 2] = (color >> 16) & 0xFF;
-                } else if (bpp == 16) {
-                    u16 r = (color >> 19) & 0x1F;
-                    u16 g = (color >> 10) & 0x3F;
-                    u16 b = (color >> 3) & 0x1F;
-                    fb16[y * p16 + x] = (r << 11) | (g << 5) | b;
+                    u32 col = rgb565_to_888(splash_rle[idx++]);
+                    int px = ox + x, py = oy + y;
+                    if (px >= 0 && px < (int)W && py >= 0 && py < (int)H) put_pixel(px, py, col);
+                    if (++x >= (int)splash_w) { x = 0; y++; }
                 }
             }
         }
     }
 }
 
-// ============================================================
-//  CarPlay
-// ============================================================
-namespace carplay {
-    enum State { DETACHED, USB_CONNECTED, IAP2_HANDSHAKE, SESSION_ACTIVE };
-    static State state = DETACHED;
-    const char* state_str() { return "CarPlay: detached"; }
-}
-
-// ============================================================
-//  Шрифт (сокращен для экономии места, работает стандартно)
-// ============================================================
+// Шрифт 8x8 (Сокращенный, чтобы влезло в сообщение)
 static const u8 font8x8[95][8] = {
     {0,0,0,0,0,0,0,0},{0x18,0x18,0x18,0x18,0,0,0x18,0},{0x6C,0x6C,0x6C,0,0,0,0,0},{0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0},
     {0x18,0x7E,0xC0,0x7C,0x06,0xFC,0x18,0},{0,0xC6,0xCC,0x18,0x30,0x66,0xC6,0},{0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0},
@@ -227,51 +159,40 @@ static void draw_string(const char* s, int x, int y, u32 color) {
         char c = *s++;
         if (c < 32 || c > 126) c = '?';
         const u8* g = font8x8[c - 32];
-        for (int r = 0; r < 8; r++) {
-            for (int cl = 0; cl < 8; cl++) {
-                if (g[r] & (1 << (7 - cl))) gfx::put_pixel(x + cl, y + r, color);
-            }
-        }
+        for (int r = 0; r < 8; r++)
+            for (int cl = 0; cl < 8; cl++)
+                if (g[r] & (1 << (7 - cl)))
+                    gfx::put_pixel(x + cl, y + r, color);
         x += 8;
     }
 }
 
-// ============================================================
-//  Точка входа
-// ============================================================
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
     (void)magic;
     gfx::init(mb);
 
-    // 1. Splash (Заставка)
-    gfx::draw_splash_rle();
-    gfx::swap();
+    // 1. Splash (картинка)
+    gfx::draw_splash();
 
-    // 2. Пауза (ОПТИМИЗИРОВАНО! Уменьшено в 30 раз, чтобы v86 не вешался)
-    for (volatile u32 i = 0; i < 10000000UL; i++) asm volatile("pause");
+    // 2. Пауза (5 млн циклов)
+    for (volatile u32 i = 0; i < 5000000UL; i++) asm volatile("pause");
 
-    // 3. Интерфейс Liquid Glass (БЕЗ ТЯЖЕЛОГО BLUR)
-    gfx::fill_rect(0, 0, gfx::W, gfx::H, 0xFF1A1A2E); // Темный фон
+    // 3. Интерфейс
+    gfx::fill_screen(0x1A1A2E);
 
     int px = 100, py = 80, pw = 600, ph = 400;
     if (px + pw > (int)gfx::W) { px = 20; pw = gfx::W - 40; }
     if (py + ph > (int)gfx::H) { py = 20; ph = gfx::H - 40; }
 
-    // Имитация стекла (просто заливаем полупрозрачным белым)
-    gfx::blend_rect(px, py, pw, ph, 0xFFFFFF, 30); 
-    // Рамка стекла
-    gfx::draw_rect(px, py, pw, ph, 0xFFFFFF); 
+    gfx::blend_rect(px, py, pw, ph, 0xFFFFFF, 30);
+    gfx::fill_rect(px, py, pw, 2, 0xFFFFFF);
+    gfx::fill_rect(px, py + ph - 2, pw, 2, 0xFFFFFF);
+    gfx::fill_rect(px, py, 2, ph, 0xFFFFFF);
+    gfx::fill_rect(px + pw - 2, py, 2, ph, 0xFFFFFF);
 
-    // Блик сверху (градиент)
-    gfx::gradient_rect(px + 1, py + 1, pw - 2, 80, 0xFFFFFF, 0x000000, 80);
-
-    // Текст
-    draw_string("iMimi OS", px + 20, py + 20, 0xFFFFFFFF);
-    draw_string("Liquid Glass: active", px + 20, py + 50, 0xFFCCCCCC);
-    draw_string(carplay::state_str(), px + 20, py + 80, 0xFF88CCFF);
-    draw_string("Build: v86 compatible", px + 20, py + 110, 0xFFAAAAAA);
-
-    gfx::swap();
+    draw_string("iMimi OS", px + 20, py + 20, 0xFFFFFF);
+    draw_string("Liquid Glass: active", px + 20, py + 50, 0xCCCCCC);
+    draw_string("CarPlay: detached", px + 20, py + 80, 0x88CCFF);
 
     for (;;) asm volatile("hlt");
 }
