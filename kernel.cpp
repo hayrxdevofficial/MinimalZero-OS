@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — No Interrupts! (100% v86 Safe)
+//  iMimi OS — Fixed RLE & Teen Edition
 // ============================================================
 
 typedef unsigned char       u8;
@@ -31,7 +31,7 @@ bool use_mouse = true;
 bool use_kb_mouse = true;
 
 int coins = 0;
-bool unlocked_adult = false;
+bool unlocked_teen = false; // Переименовали Adult в Teen
 bool unlocked_cool = false;
 bool has_auto_click = false;
 int auto_speed_level = 0;
@@ -54,7 +54,6 @@ void poll_inputs() {
         u8 data = inb(0x60);
 
         if (status & 0x20) {
-            // МЫШЬ
             if (!use_mouse && !use_touch) continue;
             mouse_byte[mouse_cycle++] = data;
             if (mouse_cycle == 3) {
@@ -68,7 +67,6 @@ void poll_inputs() {
                 }
             }
         } else {
-            // КЛАВИАТУРА
             if (!use_kb_mouse) {
                 if (data == 0x1C || data == 0x39) mouse_left_clicked = true;
                 continue;
@@ -113,15 +111,27 @@ namespace gfx {
         return (r << 16) | (g << 8) | b;
     }
 
+    // ИСПРАВЛЕННЫЙ ДЕКОДЕР RLE
     void draw_image_scaled(int ox, int oy, int draw_w, int draw_h, const u16* rle, u32 rle_size, int img_w, int img_h) {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < rle_size) {
             u16 header = rle[idx++];
-            u32 len = (header & 0x8000) ? (header & 0x7FFF) : header;
-            for (u32 i = 0; i < len; i++) {
+            if (header & 0x8000) {
+                // Если это серия (Run), читаем цвет ОДИН раз
+                u32 len = header & 0x7FFF;
                 u32 col = rgb565_to_888(rle[idx++]);
-                put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                if (++x >= img_w) { x = 0; y++; }
+                for (u32 i = 0; i < len; i++) {
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
+            } else {
+                // Если это одиночные пиксели, читаем цвет для КАЖДОГО
+                u32 len = header;
+                for (u32 i = 0; i < len; i++) {
+                    u32 col = rgb565_to_888(rle[idx++]);
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
             }
         }
     }
@@ -231,7 +241,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     int squish_pixels = 0; 
     int clicker_dir = 0;     
 
-    // 6 СЕКУНД ЗАГРУЗКИ ЧЕРЕЗ ПУСТОЙ ЦИКЛ (БЕЗ ТАЙМЕРА)
+    // 6 СЕКУНД ЗАГРУЗКИ
     int progress = 0;
     for(volatile u32 i = 0; i < 600000000; i++) {
         if (i % 10000000 == 0 && progress < 400) {
@@ -298,8 +308,9 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 }
             }
 
-            gfx::fill_rect(50, 460, 150, 40, unlocked_adult ? 0xCCCCCC : 0xEEEEEE);
-            draw_string(unlocked_adult ? "Adult (Owned)" : "Buy Adult", 60, 475, 0x000000);
+            // Заменили Adult на Teen
+            gfx::fill_rect(50, 460, 150, 40, unlocked_teen ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(unlocked_teen ? "Teen (Owned)" : "Buy Teen", 60, 475, 0x000000);
             gfx::fill_rect(250, 460, 150, 40, unlocked_cool ? 0xCCCCCC : 0xEEEEEE);
             draw_string(unlocked_cool ? "Cool (Owned)" : "Buy Cool", 270, 475, 0x000000);
             gfx::fill_rect(450, 460, 150, 40, 0xEEEEEE);
@@ -316,7 +327,8 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
 
             if (click) {
                 if (mouse_x >= 10 && mouse_x <= 70 && mouse_y >= 10 && mouse_y <= 40) { state = 1; }
-                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_adult) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_adult = true; current_mimi = 1; } }
+                // Клики по магазину
+                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_teen) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_teen = true; current_mimi = 1; } }
                 if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; } }
                 if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 460 && mouse_y <= 500) { current_mimi = 0; }
                 if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; } }
