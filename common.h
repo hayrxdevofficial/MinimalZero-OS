@@ -89,6 +89,10 @@ u32 time_ms();
 void time_init();
 void rtc_get(int& h, int& m, int& s);
 
+// ====== CMOS (хранение настроек) — ДОБАВЛЕНО! ======
+u8 cmos_read(u8 reg);
+void cmos_write(u8 reg, u8 val);
+
 // ====== Звук ======
 void beep(u32 freq, u32 ms);
 
@@ -198,7 +202,6 @@ static inline bool hov(const R& r) {
     return hit(r, g_mx, g_my);
 }
 
-// ВАЖНО: hit_rect с 6 аргументами (координаты + размер)
 static inline bool hit_rect(int rx, int ry, int rw, int rh, int px, int py) {
     return px >= rx && px < rx + rw && py >= ry && py < ry + rh;
 }
