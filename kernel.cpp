@@ -10,6 +10,7 @@ typedef unsigned long long  u64;
 static inline void outb(u16 p, u8 v) { asm volatile("outb %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u8   inb(u16 p)       { u8 v; asm volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 static inline void outw(u16 p, u16 v) { asm volatile("outw %0,%1" :: "a"(v), "Nd"(p)); }
+static inline void io_wait() { outb(0x80, 0); } // Задержка для портов
 
 struct multiboot_info {
     u32 flags; u32 mem_lower, mem_upper; u32 boot_device, cmdline, mods_count, mods_addr;
@@ -51,6 +52,21 @@ void play_sound(u32 freq) {
 }
 void stop_sound() { outb(0x61, inb(0x61) & 0xFC); }
 
+// --- ИНИЦИАЛИЗАЦИЯ МЫШИ (Без этого v86 не кликает) ---
+void init_mouse() {
+    outb(0x64, 0xA8); // Включить вспомогательное устройство (мышь)
+    outb(0x64, 0x20); // Прочитать байт конфигурации
+    io_wait();
+    u8 status = inb(0x60) | 2; // Включить прерывания мыши
+    outb(0x64, 0x60); // Записать байт конфигурации
+    io_wait();
+    outb(0x60, status);
+    outb(0x64, 0xD4); // Следующий байт - для мыши
+    outb(0x60, 0xF4); // Включить передачу данных (Enable Data Reporting)
+    io_wait();
+    inb(0x60); // Прочитать ACK
+}
+
 // --- СОХРАНЕНИЕ ---
 u8 cmos_read(u8 reg) { outb(0x70, reg); return inb(0x71); }
 void cmos_write(u8 reg, u8 val) { outb(0x70, (reg | 0x80)); outb(0x71, val); outb(0x70, 0); }
@@ -73,11 +89,12 @@ void load_settings() {
 void reboot() { save_settings(); outb(0x64, 0xFE); }
 void shutdown() { save_settings(); outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
+// --- ОПРОС ВВОДА ---
 void poll_inputs() {
     for (int i = 0; i < 16; i++) {
         if (!(inb(0x64) & 1)) break;
         u8 status = inb(0x64); u8 data = inb(0x60);
-        if (status & 0x20) {
+        if (status & 0x20) { // Данные от мыши
             mouse_byte[mouse_cycle++] = data;
             if (mouse_cycle == 3) {
                 mouse_cycle = 0;
@@ -88,7 +105,7 @@ void poll_inputs() {
                     mouse_x += dx; mouse_y -= dy;
                 }
             }
-        } else {
+        } else { // Данные от клавиатуры (кнопки)
             if (data == 0x3B) power_menu_open = !power_menu_open;
             if (data == 0x3C) { if (volume < 100) volume += 10; save_settings(); }
             if (data == 0x3D) { if (volume > 0) volume -= 10; save_settings(); }
@@ -216,6 +233,7 @@ void draw_cursor(int x, int y) {
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
     (void)magic; 
     gfx::init(mb); 
+    init_mouse(); // ВАЖНО! Без этого клики не работают
     load_settings(); 
     
     int state = 0; 
@@ -224,22 +242,15 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     int clicker_dir = 0;     
 
     u32 boot_bg = use_hayricon ? 0x121212 : 0xFFFFFF; 
-    u32 bar_bg = use_hayricon ? 0x333333 : 0xDDDDDD;  
-    u32 bar_color = use_hayricon ? 0xFFFFFF : 0xFF69B4; 
 
-    int progress = 0;
-    for(volatile u32 i = 0; i < 600000000; i++) {
-        if (i % 10000000 == 0 && progress < 400) {
-            gfx::fill_screen(boot_bg); 
-            if (use_hayricon) gfx::draw_image_scaled(110, 200, 260, 260, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
-            else gfx::draw_image_scaled(110, 200, 260, 260, img_base_rle, img_base_size, img_base_w, img_base_h);
-            
-            gfx::fill_rect(40, 600, 400, 20, bar_bg);
-            gfx::fill_rect(40, 600, progress, 20, bar_color);
-            gfx::swap();
-            progress += 7;
-        }
-    }
+    // Загрузка БЕЗ полоски
+    gfx::fill_screen(boot_bg); 
+    if (use_hayricon) gfx::draw_image_scaled(110, 200, 260, 260, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
+    else gfx::draw_image_scaled(110, 200, 260, 260, img_base_rle, img_base_size, img_base_w, img_base_h);
+    gfx::swap();
+    
+    // Пауза
+    for(volatile u32 i = 0; i < 600000000; i++);
 
     state = 1; 
 
@@ -254,7 +265,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         if (mouse_y > 799) { mouse_y = 799; }
 
         if (state == 1) {
-            // РАБОЧИЙ СТОЛ (Портрет)
+            // РАБОЧИЙ СТОЛ
             gfx::fill_screen(0x1A1A2E); 
             gfx::fill_rect(0, 0, 480, 40, 0x111122);
             
@@ -262,7 +273,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("VOL:", 350, 15, 0x888888);
             draw_int(volume, 400, 15, 0xFFFFFF);
 
-            // СЕТКА 3 ИКОНКИ В РЯД
             // 1. Clicker
             if (use_hayricon) gfx::draw_image_scaled(30, 80, 100, 100, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
             else gfx::draw_image_scaled(30, 80, 100, 100, img_base_rle, img_base_size, img_base_w, img_base_h);
@@ -305,7 +315,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 if (auto_click_timer >= target_time) { auto_click_timer = 0; coins += (click_power_level > 0) ? 2 : 1; }
             }
 
-            // Магазин (3 кнопки в ряд, 2 ряда)
             gfx::fill_rect(10, 600, 140, 60, unlocked_teen ? 0xCCCCCC : 0xEEEEEE);
             draw_string(unlocked_teen ? "Teen" : "Buy Teen", 20, 620, 0x000000);
             gfx::fill_rect(170, 600, 140, 60, unlocked_cool ? 0xCCCCCC : 0xEEEEEE);
