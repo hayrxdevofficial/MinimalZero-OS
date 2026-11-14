@@ -34,7 +34,6 @@ def rle_encode(pixels):
 
 def process_image(src, name, f_out):
     img = Image.open(src).convert("RGB")
-    # Ограничиваем максимальный размер
     MAX = 600
     if img.width > MAX or img.height > MAX:
         img.thumbnail((MAX, MAX), Image.LANCZOS)
@@ -58,3 +57,4 @@ with open("images.h", "w") as f:
     process_image("img_base.jpg", "img_base", f)
     process_image("img_adult.jpg", "img_adult", f)
     process_image("img_cool.jpg", "img_cool", f)
+    process_image("img_hayrulla.jpg", "img_hayrulla", f)
