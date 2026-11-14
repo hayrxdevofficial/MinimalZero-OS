@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Mobile Portrait (Fixed PS/2 Sign-Magnitude)
+//  iMimi OS — Mobile Portrait (Fixed with proper drain)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -22,7 +22,7 @@ struct multiboot_info {
 
 #include "images.h"
 
-// --- PS/2 МЫШЬ (Sign-Magnitude) ---
+// --- PS/2 МЫШЬ ---
 namespace mouse {
     int x = 240, y = 400;
     u8  btn = 0;
@@ -34,16 +34,24 @@ namespace mouse {
     void write(u8 v) { wait_w(); outb(0x64, 0xD4); wait_w(); outb(0x60, v); }
     u8   read() { return wait_r() ? inb(0x60) : 0; }
 
+    void drain() {
+        for (int i = 0; i < 100; i++) {
+            if (!(inb(0x64) & 1)) break;
+            inb(0x60);
+        }
+    }
+
     void init() {
         wait_w(); outb(0x64, 0xA8);
         wait_w(); outb(0x64, 0x20);
         u8 status = read();
-        status &= ~0x20;   // Включаем тактирование
-        status &= ~0x02;   // Запрещаем IRQ12
+        status &= ~0x20;   // Clock enable
+        status &= ~0x02;   // Disable IRQ12
         wait_w(); outb(0x64, 0x60);
         wait_w(); outb(0x60, status);
-        write(0xF6); read(); // Reset
-        write(0xF4); read(); // Enable Data Reporting
+        write(0xF6); read(); read(); read(); // Reset (ACK + BAT + ID)
+        write(0xF4); read(); // Enable Data Reporting (ACK)
+        drain(); // Очищаем всё лишнее из буфера
     }
 
     bool feed(u8 b) {
@@ -58,8 +66,7 @@ namespace mouse {
         if (pkt[0] & 0x20) dy = -dy;
 
         x += dx;
-        y -= dy; // Инверсия Y для экрана
-
+        y -= dy;
         if (x < 0) x = 0; if (x > 479) x = 479;
         if (y < 0) y = 0; if (y > 799) y = 799;
         
@@ -213,13 +220,15 @@ void draw_cursor(int x, int y) {
 }
 
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
-    (void)magic; gfx::init(mb); mouse::init(); load_settings();
+    (void)magic; 
+    gfx::init(mb); 
+    mouse::init(); 
+    load_settings();
     
     int state = 0, current_mimi = 0, squish_pixels = 0, clicker_dir = 0;
     u8 prev_btn = 0;
     u32 boot_bg = use_hayricon ? 0x121212 : 0xFFFFFF;
 
-    // Загрузка 3 сек
     gfx::fill_screen(boot_bg);
     if (use_hayricon) gfx::draw_image_scaled(110, 200, 260, 260, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
     else gfx::draw_image_scaled(110, 200, 260, 260, img_base_rle, img_base_size, img_base_w, img_base_h);
@@ -229,9 +238,8 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     state = 1;
 
     while (1) {
-        for (int i = 0; i < 32; i++) {
-            u8 st = inb(0x64);
-            if (!(st & 1)) break;
+        u8 st = inb(0x64);
+        if (st & 1) {
             u8 b = inb(0x60);
             if (st & 0x20) { mouse::feed(b); }
             else {
@@ -245,12 +253,13 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         bool click = (cur_btn & 1) && !(prev_btn & 1);
         prev_btn = cur_btn;
 
-        int mx = mouse::x, my = mouse::y;
+        int mx = mouse::x;
+        int my = mouse::y;
 
         if (state == 1) {
             gfx::fill_screen(0x1A1A2E); gfx::fill_rect(0, 0, 480, 40, 0x111122);
             draw_string("12:00", 20, 15, 0xFFFFFF); draw_string("VOL:", 350, 15, 0x888888); draw_int(volume, 400, 15, 0xFFFFFF);
-            draw_string("v3", 460, 15, 0x666666);
+            draw_string("v5", 460, 15, 0x666666);
 
             if (use_hayricon) gfx::draw_image_scaled(30, 80, 100, 100, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
             else gfx::draw_image_scaled(30, 80, 100, 100, img_base_rle, img_base_size, img_base_w, img_base_h);
