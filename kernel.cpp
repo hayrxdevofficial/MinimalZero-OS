@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Device Settings & Input Manager
+//  iMimi OS — Device Settings & Input Manager (Fixed)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -26,12 +26,10 @@ struct multiboot_info {
 int mouse_x = 400, mouse_y = 300;
 bool mouse_left_clicked = false;
 
-// Настройки ввода
 bool use_touch = false;
 bool use_mouse = true;
 bool use_kb_mouse = true;
 
-// Игровые переменные
 int coins = 0;
 bool unlocked_adult = false;
 bool unlocked_cool = false;
@@ -46,48 +44,14 @@ volatile u32 system_ticks = 0;
 u8 mouse_cycle = 0;
 u8 mouse_byte[3];
 
-// --- ОПРОС ВВОДА ---
-void poll_inputs() {
-    // Опрос прерываний (в безопасном режиме)
-    while (inb(0x64) & 1) {
-        u8 status = inb(0x64);
-        u8 data = inb(0x60);
+// --- СИСТЕМНЫЕ ФУНКЦИИ ---
+extern "C" void isr0(); // Объявляем глобально
 
-        if (status & 0x20) {
-            // ДАННЫЕ ОТ МЫШИ (Touchpad v86)
-            if (!use_mouse && !use_touch) continue;
-            
-            mouse_byte[mouse_cycle++] = data;
-            if (mouse_cycle == 3) {
-                mouse_cycle = 0;
-                if (mouse_byte[0] & 0x01) mouse_left_clicked = true; // Клик
-                if (mouse_byte[0] & 0x08) {} // Переполнение X
-                else {
-                    int dx = (mouse_byte[0] & 0x10) ? (mouse_byte[1] - 256) : mouse_byte[1];
-                    int dy = (mouse_byte[0] & 0x20) ? (mouse_byte[2] - 256) : mouse_byte[2];
-                    mouse_x += dx;
-                    mouse_y -= dy; // Инверсия Y для экрана
-                }
-            }
-        } else {
-            // ДАННЫЕ ОТ КЛАВИАТУРЫ
-            if (!use_kb_mouse) {
-                if (data == 0x1C || data == 0x39) mouse_left_clicked = true; // Enter / Space
-                continue;
-            }
-            
-            if (data == 0x48 || data == 0x11) mouse_y -= 20; // Вверх
-            if (data == 0x50 || data == 0x1F) mouse_y += 20; // Вниз
-            if (data == 0x4B || data == 0x1E) mouse_x -= 20; // Влево
-            if (data == 0x4D || data == 0x20) mouse_x += 20; // Вправо
-            if (data == 0x1C || data == 0x39) mouse_left_clicked = true; // Enter/Space
-            if (data == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; } // Esc
-        }
-    }
+extern "C" void timer_handler_c() {
+    system_ticks++;
+    outb(0x20, 0x20);
 }
 
-// --- СИСТЕМНЫЕ ФУНКЦИИ ---
-extern "C" void timer_handler_c() { system_ticks++; outb(0x20, 0x20); }
 asm(".global isr0\n isr0:\n pusha\n call timer_handler_c\n popa\n iret\n");
 
 void init_timer() {
@@ -104,7 +68,6 @@ void init_timer() {
     idtp.limit = (sizeof(IDT_entry) * 256) - 1; idtp.base = (u32)&idt;
     for(int i = 0; i < 256; i++) { idt[i].base_low = 0; idt[i].sel = 0; idt[i].zero = 0; idt[i].flags = 0; idt[i].base_high = 0; }
 
-    extern "C" void isr0();
     u32 base = (u32)isr0;
     idt[0x20].base_low = base & 0xFFFF; idt[0x20].sel = 0x08; idt[0x20].flags = 0x8E; idt[0x20].base_high = (base >> 16) & 0xFFFF;
 
@@ -114,6 +77,44 @@ void init_timer() {
 
 void reboot() { outb(0x64, 0xFE); }
 void shutdown() { outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
+
+// --- ОПРОС ВВОДА ---
+void poll_inputs() {
+    while (inb(0x64) & 1) {
+        u8 status = inb(0x64);
+        u8 data = inb(0x60);
+
+        if (status & 0x20) {
+            // ДАННЫЕ ОТ МЫШИ
+            if (!use_mouse && !use_touch) continue;
+            
+            mouse_byte[mouse_cycle++] = data;
+            if (mouse_cycle == 3) {
+                mouse_cycle = 0;
+                if (mouse_byte[0] & 0x01) mouse_left_clicked = true;
+                if (!(mouse_byte[0] & 0x08)) {
+                    int dx = (mouse_byte[0] & 0x10) ? (mouse_byte[1] - 256) : mouse_byte[1];
+                    int dy = (mouse_byte[0] & 0x20) ? (mouse_byte[2] - 256) : mouse_byte[2];
+                    mouse_x += dx;
+                    mouse_y -= dy;
+                }
+            }
+        } else {
+            // ДАННЫЕ ОТ КЛАВИАТУРЫ
+            if (!use_kb_mouse) {
+                if (data == 0x1C || data == 0x39) mouse_left_clicked = true;
+                continue;
+            }
+            
+            if (data == 0x48 || data == 0x11) mouse_y -= 20;
+            if (data == 0x50 || data == 0x1F) mouse_y += 20;
+            if (data == 0x4B || data == 0x1E) mouse_x -= 20;
+            if (data == 0x4D || data == 0x20) mouse_x += 20;
+            if (data == 0x1C || data == 0x39) mouse_left_clicked = true;
+            if (data == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; }
+        }
+    }
+}
 
 // --- ГРАФИКА ---
 namespace gfx {
@@ -259,7 +260,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     gfx::init(mb); 
     init_timer();
     
-    int state = 0; // 0=Boot, 1=Desktop, 2=Clicker, 3=Files, 4=Settings
+    int state = 0; 
     int current_mimi = 0; 
     int squish_pixels = 0; 
     int clicker_dir = 0;     
@@ -280,11 +281,13 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         bool click = mouse_left_clicked; 
         mouse_left_clicked = false;
 
-        if (mouse_x < 0) mouse_x = 0; if (mouse_x > 799) mouse_x = 799;
-        if (mouse_y < 0) mouse_y = 0; if (mouse_y > 599) mouse_y = 599;
+        // ИСПРАВЛЕННЫЕ IF (добавлены скобки)
+        if (mouse_x < 0) { mouse_x = 0; }
+        if (mouse_x > 799) { mouse_x = 799; }
+        if (mouse_y < 0) { mouse_y = 0; }
+        if (mouse_y > 599) { mouse_y = 599; }
 
         if (state == 1) {
-            // РАБОЧИЙ СТОЛ
             gfx::fill_screen(0x1A1A2E); 
             gfx::fill_rect(0, 0, 800, 30, 0x111122);
             
@@ -302,13 +305,12 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("Files", 180, 160, 0xFFFFFF);
 
             if (click) {
-                if (mouse_x >= 50 && mouse_x <= 130 && mouse_y >= 70 && mouse_y <= 150) state = 2; 
-                if (mouse_x >= 160 && mouse_x <= 240 && mouse_y >= 70 && mouse_y <= 150) state = 3; 
-                if (mouse_x >= 750 && mouse_y <= 30) power_menu_open = !power_menu_open;
+                if (mouse_x >= 50 && mouse_x <= 130 && mouse_y >= 70 && mouse_y <= 150) { state = 2; }
+                if (mouse_x >= 160 && mouse_x <= 240 && mouse_y >= 70 && mouse_y <= 150) { state = 3; }
+                if (mouse_x >= 750 && mouse_y <= 30) { power_menu_open = !power_menu_open; }
             }
 
         } else if (state == 2) {
-            // CLICKER
             gfx::fill_screen(0xFFFFFF); 
             gfx::fill_rect(10, 10, 60, 30, 0xEEEEEE);
             draw_string("< Back", 15, 20, 0x000000);
@@ -344,10 +346,10 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string(click_power_level > 0 ? "Power (Max)" : "Power +1", 480, 535, 0x000000);
 
             if (click) {
-                if (mouse_x >= 10 && mouse_x <= 70 && mouse_y >= 10 && mouse_y <= 40) state = 1;
+                if (mouse_x >= 10 && mouse_x <= 70 && mouse_y >= 10 && mouse_y <= 40) { state = 1; }
                 if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_adult) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_adult = true; current_mimi = 1; } }
                 if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; } }
-                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 460 && mouse_y <= 500) current_mimi = 0;
+                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 460 && mouse_y <= 500) { current_mimi = 0; }
                 if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; } }
                 if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 560) { if (coins >= speed_cost) { coins -= speed_cost; auto_speed_level++; } }
                 if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 560) { if (click_power_level == 0 && coins >= 30) { coins -= 30; click_power_level = 1; } }
@@ -370,7 +372,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 if (squish_pixels <= 0) { squish_pixels = 0; clicker_dir = 0; }
             }
         } else if (state == 3) {
-            // ФАЙЛЫ
             gfx::fill_screen(0x1A1A2E);
             int wx = 150, wy = 100, ww = 500, wh = 350;
             gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
@@ -390,10 +391,9 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("Pictures", wx + 30, wy + 250, 0x000000);
 
             if (click) {
-                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) state = 1;
+                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) { state = 1; }
             }
         } else if (state == 4) {
-            // НАСТРОЙКИ УСТРОЙСТВА
             gfx::fill_screen(0x1A1A2E);
             int wx = 200, wy = 150, ww = 400, wh = 300;
             gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
@@ -403,32 +403,27 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             gfx::fill_rect(wx + ww - 30, wy + 5, 20, 20, 0xE74C3C);
             draw_string("X", wx + ww - 25, wy + 10, 0xFFFFFF);
 
-            // Touchscreen
             gfx::fill_rect(wx + 20, wy + 60, 360, 40, use_touch ? 0x4CAF50 : 0xEEEEEE);
             draw_string("Touchscreen", wx + 30, wy + 75, use_touch ? 0xFFFFFF : 0x000000);
             draw_string(use_touch ? "ON" : "OFF", wx + 310, wy + 75, use_touch ? 0xFFFFFF : 0x000000);
 
-            // Mouse
             gfx::fill_rect(wx + 20, wy + 120, 360, 40, use_mouse ? 0x4CAF50 : 0xEEEEEE);
             draw_string("Mouse", wx + 30, wy + 135, use_mouse ? 0xFFFFFF : 0x000000);
             draw_string(use_mouse ? "ON" : "OFF", wx + 310, wy + 135, use_mouse ? 0xFFFFFF : 0x000000);
 
-            // Keyboard Mouse
             gfx::fill_rect(wx + 20, wy + 180, 360, 40, use_kb_mouse ? 0x4CAF50 : 0xEEEEEE);
             draw_string("Keyboard Mouse", wx + 30, wy + 195, use_kb_mouse ? 0xFFFFFF : 0x000000);
             draw_string(use_kb_mouse ? "ON" : "OFF", wx + 310, wy + 195, use_kb_mouse ? 0xFFFFFF : 0x000000);
 
             if (click) {
-                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) state = 1; // Закрыть
+                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) { state = 1; }
                 
-                // Переключатели
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 60 && mouse_y <= wy + 100) use_touch = !use_touch;
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 120 && mouse_y <= wy + 160) use_mouse = !use_mouse;
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 180 && mouse_y <= wy + 220) use_kb_mouse = !use_kb_mouse;
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 60 && mouse_y <= wy + 100) { use_touch = !use_touch; }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 120 && mouse_y <= wy + 160) { use_mouse = !use_mouse; }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 180 && mouse_y <= wy + 220) { use_kb_mouse = !use_kb_mouse; }
             }
         }
 
-        // Меню PWR
         if (power_menu_open) {
             gfx::fill_rect(650, 35, 150, 130, 0x333333);
             
@@ -443,9 +438,9 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
 
             if (click) {
                 if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 45 && mouse_y <= 75) { state = 4; power_menu_open = false; }
-                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 85 && mouse_y <= 115) reboot();
-                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 125 && mouse_y <= 155) shutdown();
-                if (mouse_x < 650 || mouse_x > 800 || mouse_y > 165) power_menu_open = false;
+                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 85 && mouse_y <= 115) { reboot(); }
+                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 125 && mouse_y <= 155) { shutdown(); }
+                if (mouse_x < 650 || mouse_x > 800 || mouse_y > 165) { power_menu_open = false; }
             }
         }
 
