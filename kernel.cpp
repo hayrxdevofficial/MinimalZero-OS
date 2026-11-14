@@ -523,8 +523,8 @@ static void fs_init() {
 // ------------------------------------------------------------
 //  Окна
 // ------------------------------------------------------------
-enum { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, NAPPS };
-static const char* app_title[NAPPS] = { "Files", "Trash", "Mimi Clicker", "Calculator", "Settings" };
+enum { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER, NAPPS };
+static const char* app_title[NAPPS] = { "Files", "Trash", "Mimi Clicker", "Calculator", "Settings", "Browser" };
 struct Win { bool open, min; int x, y, w, h; };
 static Win wins[NAPPS];
 static int zord[NAPPS];
@@ -532,7 +532,7 @@ static int drag_win = -1, drag_dx = 0, drag_dy = 0;
 static bool start_open = false, power_open = false;
 
 static void init_windows() {
-    static const int sz[NAPPS][2] = { {640, 460}, {540, 400}, {580, 440}, {300, 410}, {460, 400} };
+    static const int sz[NAPPS][2] = { {640, 460}, {540, 400}, {580, 440}, {300, 410}, {460, 400}, {560, 340} };
     for (int i = 0; i < NAPPS; i++) {
         wins[i].open = false; wins[i].min = false; wins[i].w = sz[i][0]; wins[i].h = sz[i][1];
         if (wins[i].w > SCRW - 40) wins[i].w = SCRW - 40;
@@ -957,6 +957,57 @@ static void clicker_click(int px, int py, int cx, int cy, int cw, int ch) {
     }
 }
 
+
+// ------------------------------------------------------------
+//  Приложение: Browser (открывает сайты в окне эмулятора на хосте)
+//  ОС шлёт строку "OPEN <адрес>\n" в COM1; страница-эмулятор показывает сайт.
+// ------------------------------------------------------------
+static void host_send(const char* s) {
+    for (; *s; s++) {
+        for (int t = 0; t < 20000 && !(inb(0x3FD) & 0x20); t++);   // ждём готовности UART (с таймаутом)
+        outb(0x3F8, (u8)*s);
+    }
+}
+static char brw_url[96] = "wikipedia.org"; static int brw_len = 13;
+static char brw_status[96] = "Type an address or pick a site";
+static void brw_open(const char* url) {
+    if (!url[0]) return;
+    host_send("OPEN "); host_send(url); host_send("\n");
+    int p = sappend(brw_status, 0, "Opening: ", 96); sappend(brw_status, p, url, 96);
+    beep(1000, 40);
+}
+static const char* brw_names[6] = { "Wikipedia", "DuckDuckGo", "Google", "GitHub", "YouTube", "Reddit" };
+static const char* brw_urls[6]  = { "wikipedia.org", "duckduckgo.com", "google.com", "github.com", "youtube.com", "reddit.com" };
+static R brw_input(int cx, int cy, int cw) { return { cx + 12, cy + 8, cw - 24 - 76, 30 }; }
+static R brw_go(int cx, int cy, int cw)    { return { cx + cw - 12 - 68, cy + 8, 68, 30 }; }
+static R brw_btn(int i, int cx, int cy, int cw) { int bw = (cw - 48) / 2; return { cx + 16 + (i % 2) * (bw + 16), cy + 112 + (i / 2) * 50, bw, 40 }; }
+static void browser_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, C_BG);
+    gfx::fill_rect(cx, cy, cw, 46, C_PANEL);
+    R in = brw_input(cx, cy, cw);
+    gfx::fill_round(in.x, in.y, in.w, in.h, 6, 0xFFFFFF); gfx::rect_outline(in.x, in.y, in.w, in.h, C_ACC);
+    int maxc = (in.w - 16) / 8; int off = brw_len > maxc - 1 ? brw_len - (maxc - 1) : 0;
+    draw_text_n(brw_url + off, in.x + 8, in.y + 11, C_TEXT, maxc);
+    if (blink_state) draw_char('_', in.x + 8 + (brw_len - off) * 8, in.y + 11, C_ACC_D);
+    draw_button(brw_go(cx, cy, cw), "Go", C_ACC, 0xFFFFFF, brw_len > 0);
+    draw_text("Quick links", cx + 16, cy + 84, C_TEXT);
+    for (int i = 0; i < 6; i++) draw_button(brw_btn(i, cx, cy, cw), brw_names[i], 0x4B5563, 0xFFFFFF);
+    draw_text_n(brw_status, cx + 16, cy + ch - 24, C_GRAY, (cw - 32) / 8);
+}
+static void browser_click(int px, int py, int cx, int cy, int cw, int ch) {
+    (void)ch;
+    if (hit(brw_go(cx, cy, cw), px, py)) { brw_open(brw_url); return; }
+    for (int i = 0; i < 6; i++) if (hit(brw_btn(i, cx, cy, cw), px, py)) {
+        scopy(brw_url, brw_urls[i], 96); brw_len = slen(brw_url); brw_open(brw_url); return;
+    }
+}
+static bool browser_key(int k) {
+    if (k == '\n') { brw_open(brw_url); return true; }
+    if (k == '\b') { if (brw_len > 0) brw_url[--brw_len] = 0; return true; }
+    if (k >= 32 && k < 127 && brw_len < 90) { brw_url[brw_len++] = (char)k; brw_url[brw_len] = 0; return true; }
+    return false;
+}
+
 // ------------------------------------------------------------
 //  Рисование окон / рабочего стола
 // ------------------------------------------------------------
@@ -967,6 +1018,7 @@ static void app_draw(int a, int cx, int cy, int cw, int ch) {
         case APP_CLICK: clicker_draw(cx, cy, cw, ch); break;
         case APP_CALC:  calc_draw(cx, cy, cw, ch); break;
         case APP_SET:   settings_draw(cx, cy, cw, ch); break;
+        case APP_BROWSER: browser_draw(cx, cy, cw, ch); break;
     }
 }
 static void app_click(int a, int px, int py, int cx, int cy, int cw, int ch) {
@@ -976,6 +1028,7 @@ static void app_click(int a, int px, int py, int cx, int cy, int cw, int ch) {
         case APP_CLICK: clicker_click(px, py, cx, cy, cw, ch); break;
         case APP_CALC:  calc_click(px, py, cx, cy, cw, ch); break;
         case APP_SET:   settings_click(px, py, cx, cy, cw, ch); break;
+        case APP_BROWSER: browser_click(px, py, cx, cy, cw, ch); break;
     }
 }
 
@@ -999,6 +1052,13 @@ static void draw_app_icon(int a, int x, int y) {
         gfx::fill_round(x + 6, y + 1, 44, 54, 7, 0x2D3340);
         gfx::fill_round(x + 11, y + 6, 34, 14, 3, 0x9BE7A7);
         for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) gfx::fill_round(x + 11 + c * 9, y + 25 + r * 7, 7, 5, 1, c == 3 ? 0xF59E0B : 0xE5E7EB);
+    } else if (a == APP_BROWSER) {
+        gfx::fill_circle(x + 28, y + 28, 26, 0x2563EB);
+        gfx::fill_circle(x + 28, y + 28, 22, 0x60A5FA);
+        gfx::fill_rect(x + 27, y + 6, 2, 44, 0xFFFFFF); gfx::fill_rect(x + 6, y + 27, 44, 2, 0xFFFFFF);
+        gfx::fill_round(x + 17, y + 6, 22, 44, 11, 0x60A5FA); gfx::rect_outline(x + 17, y + 6, 22, 44, 0xFFFFFF);
+        gfx::fill_rect(x + 27, y + 6, 2, 44, 0xFFFFFF);
+        gfx::fill_rect(x + 8, y + 17, 40, 2, 0xFFFFFF); gfx::fill_rect(x + 8, y + 37, 40, 2, 0xFFFFFF);
     } else {
         int cx = x + 28, cy = y + 28;
         static const int dx[8] = { 22, 15, 0, -15, -22, -15, 0, 15 }, dy[8] = { 0, 15, 22, 15, 0, -15, -22, -15 };
@@ -1006,9 +1066,9 @@ static void draw_app_icon(int a, int x, int y) {
         gfx::fill_circle(cx, cy, 18, 0xAEB6C4); gfx::fill_circle(cx, cy, 8, 0x4B5563);
     }
 }
-static const int desk_apps[5] = { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET };
+static const int desk_apps[6] = { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER };
 static int desk_sel = -1;
-static R desk_icon(int i) { return { 18, 18 + i * 100, 88, 92 }; }
+static R desk_icon(int i) { return { 18, 14 + i * 98, 88, 92 }; }
 
 static void draw_wallpaper() {
     gfx::fill_gradient(0, 0, SCRW, SCRH, 0x0E1A3F, 0x4A2A6B);
@@ -1018,7 +1078,7 @@ static void draw_wallpaper() {
     draw_text("iMimi OS", SCRW - 8 * 8 * 2 - 24, SCRH - TASKBAR_H - 40, 0xFFFFFF, 2);
 }
 static void draw_desktop_icons() {
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         R r = desk_icon(i);
         if (desk_sel == i) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 70);
         else if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 34);
@@ -1046,11 +1106,11 @@ static void draw_window(int a) {
 
 // панель задач и меню «Пуск»
 static R start_btn() { return { 6, SCRH - TASKBAR_H + 6, 96, 32 }; }
-static R taskbar_btn(int slot) { return { 112 + slot * 148, SCRH - TASKBAR_H + 6, 142, 32 }; }
+static R taskbar_btn(int slot) { return { 112 + slot * 128, SCRH - TASKBAR_H + 6, 122, 32 }; }
 #define SM_W 230
-#define SM_ITEMS 7
+#define SM_ITEMS 8
 static R sm_rect() { int h = 44 + SM_ITEMS * 34 + 10; return { 6, SCRH - TASKBAR_H - 6 - h, SM_W, h }; }
-static R sm_item(int i) { R s = sm_rect(); return { s.x + 8, s.y + 40 + i * 34 + (i >= 5 ? 6 : 0), s.w - 16, 32 }; }
+static R sm_item(int i) { R s = sm_rect(); return { s.x + 8, s.y + 40 + i * 34 + (i >= 6 ? 6 : 0), s.w - 16, 32 }; }
 static int clock_h = 0, clock_m = 0;
 
 static void draw_taskbar() {
@@ -1066,7 +1126,7 @@ static void draw_taskbar() {
         bool act = (tw == a);
         gfx::fill_round(r.x, r.y, r.w, r.h, 8, act ? 0x3D5CB8 : (hov(r) ? 0x2B3566 : 0x1F2748));
         if (act) gfx::fill_rect(r.x + 10, r.y + r.h - 3, r.w - 20, 2, 0x8FB4FF);
-        draw_text_n(app_title[a], r.x + 10, r.y + 12, wins[a].min ? 0x8892B8 : 0xFFFFFF, 16);
+        draw_text_n(app_title[a], r.x + 10, r.y + 12, wins[a].min ? 0x8892B8 : 0xFFFFFF, 13);
     }
     char c[8]; c[0] = '0' + clock_h / 10; c[1] = '0' + clock_h % 10; c[2] = ':'; c[3] = '0' + clock_m / 10; c[4] = '0' + clock_m % 10; c[5] = 0;
     draw_text(c, SCRW - 16 - text_w(c, 2), ty + 14, 0xFFFFFF, 2);
@@ -1079,11 +1139,11 @@ static void draw_startmenu() {
     gfx::fill_round(s.x, s.y, s.w, s.h, 12, 0x181D38);
     gfx::rect_outline(s.x + 1, s.y + 1, s.w - 2, s.h - 2, 0x30396B);
     draw_text("iMimi OS  PC Edition", s.x + 16, s.y + 16, 0xB4BCE0);
-    static const char* items[SM_ITEMS] = { "Files", "Trash", "Mimi Clicker", "Calculator", "Settings", "Restart", "Shut down" };
+    static const char* items[SM_ITEMS] = { "Files", "Trash", "Mimi Clicker", "Calculator", "Settings", "Browser", "Restart", "Shut down" };
     for (int i = 0; i < SM_ITEMS; i++) {
         R r = sm_item(i);
-        if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 8, i >= 5 ? 0x7A2B34 : 0x2B3566);
-        if (i < 5) { static const u32 sw[5] = { 0xF5C542, 0xB8C0CC, 0xFFFFFF, 0x2D3340, 0xAEB6C4 }; gfx::fill_round(r.x + 6, r.y + 6, 20, 20, 5, sw[i]); }
+        if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 8, i >= 6 ? 0x7A2B34 : 0x2B3566);
+        if (i < 6) { static const u32 sw[6] = { 0xF5C542, 0xB8C0CC, 0xFFFFFF, 0x2D3340, 0xAEB6C4, 0x60A5FA }; gfx::fill_round(r.x + 6, r.y + 6, 20, 20, 5, sw[i]); }
         draw_text(items[i], r.x + 44, r.y + 12, 0xFFFFFF);
     }
 }
@@ -1147,7 +1207,7 @@ static void handle_press(int px, int py) {
         if (hit(sm_rect(), px, py)) {
             for (int i = 0; i < SM_ITEMS; i++) if (hit(sm_item(i), px, py)) {
                 start_open = false;
-                if (i < 5) open_app(i); else if (i == 5) reboot(); else shutdown();
+                if (i < 6) open_app(i); else if (i == 6) reboot(); else shutdown();
                 return;
             }
             return;
@@ -1179,7 +1239,7 @@ static void handle_press(int px, int py) {
         app_click(a, px, py, w.x, w.y + TITLEH, w.w, w.h - TITLEH);
         return;
     }
-    for (int i = 0; i < 5; i++) if (hit(desk_icon(i), px, py)) {
+    for (int i = 0; i < 6; i++) if (hit(desk_icon(i), px, py)) {
         static int last = -1; static u32 lt = 0;
         desk_sel = i;
         if (last == i && elapsed_ms(lt) < 450) { last = -1; open_app(desk_apps[i]); }
@@ -1200,6 +1260,7 @@ static void on_key(int k) {
     int t = top_win();
     if (t == APP_FILES && fm_mode != 0) { files_key(k); return; }
     if (t == APP_CALC && calc_key(k)) return;
+    if (t == APP_BROWSER && browser_key(k)) return;
     if (k == 27) { if (t >= 0) close_app(t); return; }
     if (!use_kb_mouse) return;
     int step = 12 * mouse_speed;
@@ -1290,7 +1351,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         }
         u32 bl = (ms_now() / 500) & 1;
         if (bl != blink_prev) { blink_prev = bl; blink_state = bl != 0;
-        if (wins[APP_FILES].open && !wins[APP_FILES].min && fm_mode != 0) dirty = true; }
+        if ((wins[APP_FILES].open && !wins[APP_FILES].min && fm_mode != 0) || (wins[APP_BROWSER].open && !wins[APP_BROWSER].min)) dirty = true; }
 
         // --- рисование ---
         if (dirty) { dirty = false; render(); gfx::swap(); }
