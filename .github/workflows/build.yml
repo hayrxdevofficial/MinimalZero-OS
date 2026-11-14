@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     name: Build on Ubuntu
-    runs-on: ubuntu-22.04  # <--- ИСПОЛЬЗУЕМ СТАБИЛЬНУЮ 22.04 ВМЕСТО ubuntu-latest
+    runs-on: ubuntu-latest  # <--- ИСПОЛЬЗУЕМ СТАБИЛЬНУЮ 22.04 ВМЕСТО ubuntu-latest
 
     steps:
       - name: Checkout code
