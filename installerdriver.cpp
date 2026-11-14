@@ -1,46 +1,9 @@
 #include "common.h"
-
-// .mimi — ZIP-архив:
-//   app.js          — код приложения (обязательно)
-//   icon.png        — иконка (обязательно)
-//   manifest.json   — манифест (обязательно)
-//   README.txt      — описание (опционально)
-
-#define MIMI_MAX      (4 * 1024 * 1024)
-#define MIMI_MAX_FILES 32
-
-struct MimiFile {
-    char name[96];
-    u32  offset;
-    u32  size;
-    u32  comp_size;
-    u16  method;
-};
-
-struct MimiArchive {
-    u8* buf;
-    int buf_size;
-    MimiFile files[MIMI_MAX_FILES];
-    int n_files;
-    bool valid;
-    // Из manifest.json
-    char app_id[64];
-    char app_name[64];
-    char app_author[64];
-    char app_version[16];
-    char app_desc[256];
-    // Иконка
-    u32 icon_offset;
-    u32 icon_size;
-    // JS-код
-    u32 js_offset;
-    u32 js_size;
-};
+#include "installer.h"
 
 static u16 rd16(const u8* p) { return p[0] | (p[1] << 8); }
 static u32 rd32(const u8* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((u32)p[3] << 24); }
 
-// Простой JSON-парсер для плоского объекта
 static bool json_get(const char* json, int len, const char* key, char* out, int out_max) {
     char search[64];
     int klen = slen(key);
@@ -80,7 +43,7 @@ static bool parse_mimi(MimiArchive* a, u8* buf, int size) {
 
     int eocd = -1;
     for (int i = size - 22; i >= 0 && i >= size - 65557; i--) {
-        if (buf[i]   == 0x50 && buf[i+1] == 0x4B &&
+        if (buf[i] == 0x50 && buf[i+1] == 0x4B &&
             buf[i+2] == 0x05 && buf[i+3] == 0x06) { eocd = i; break; }
     }
     if (eocd < 0) return false;
@@ -128,7 +91,6 @@ static bool parse_mimi(MimiArchive* a, u8* buf, int size) {
 
     if (!has_js || !has_icon || !has_manifest) return false;
 
-    // Парсим manifest.json (только для несжатых)
     for (int i = 0; i < a->n_files; i++) {
         if (!seq(a->files[i].name, "manifest.json")) continue;
         if (a->files[i].method != 0) break;
@@ -146,16 +108,8 @@ static bool parse_mimi(MimiArchive* a, u8* buf, int size) {
     return true;
 }
 
-// Возвращает:
-//   0  = OK
-//  -1  = не ZIP
-//  -2  = нет app.js
-//  -3  = нет icon.png
-//  -4  = нет manifest.json
-//  -5  = плохой manifest
 int install_mimi(u8* data, int size, MimiArchive* out) {
     if (!parse_mimi(out, data, size)) {
-        // Различаем: ZIP валиден?
         bool is_zip = false;
         for (int i = 0; i < size - 4; i++) {
             if (data[i]==0x50 && data[i+1]==0x4B &&

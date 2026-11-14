@@ -1,8 +1,9 @@
 #include "common.h"
+#include "apps.h"
+#include "installer.h"
 
 static u8 mimi_buf[MIMI_MAX];
 static int mimi_sz = 0, mimi_stat = 0;
-static char mimi_name[64];
 static MimiArchive cur_mimi;
 
 void installer_draw(int cx, int cy, int cw, int ch) {
@@ -36,7 +37,7 @@ void installer_draw(int cx, int cy, int cw, int ch) {
 void installer_click(int px, int py, int cx, int cy, int cw, int ch) {
     if (mimi_stat > 0) {
         if (hit({cx + 16, cy + ch - 60, 200, 40}, px, py)) {
-            net_run_js(cur_mimi.app_id); // Отправляем в JS
+            net_run_js(cur_mimi.app_id);
         }
         if (hit({cx + 226, cy + ch - 60, 200, 40}, px, py)) {
             mimi_stat = 0;
