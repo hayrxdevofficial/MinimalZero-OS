@@ -15,13 +15,13 @@ static inline u16  inw(u16 p)         { u16 v; asm volatile("inw %1,%0" : "=a"(v
 
 extern "C" {
 void* memset(void* d, int c, unsigned int n) {
-    u8* p = (u8*)d; 
-    while (n--) { *p++ = (u8)c; } 
+    u8* p = (u8*)d;
+    while (n--) { *p++ = (u8)c; }
     return d;
 }
 void* memcpy(void* d, const void* s, unsigned int n) {
     u8* a = (u8*)d; const u8* b = (const u8*)s;
-    while (n--) { *a++ = *b++; } 
+    while (n--) { *a++ = *b++; }
     return d;
 }
 void* memmove(void* d, const void* s, unsigned int n) {
@@ -56,7 +56,7 @@ static inline bool seq(const char* a, const char* b) {
 }
 static inline int sappend(char* d, int pos, const char* s, int max) {
     while (*s && pos < max - 1) { d[pos++] = *s++; }
-    d[pos] = 0; 
+    d[pos] = 0;
     return pos;
 }
 static inline int itoa_(int v, char* buf) {
@@ -182,4 +182,25 @@ namespace mouse {
 // ====== KBD namespace ======
 namespace kbd {
     void feed(u8 b);
+}
+
+// ============================================================
+//  UI helpers — ПОСЛЕ gfx и text, ДО apps.h
+// ============================================================
+
+struct R { int x, y, w, h; };
+
+static inline bool hit(const R& r, int px, int py) {
+    return px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
+}
+static inline bool hov(const R& r) {
+    return hit(r, g_mx, g_my);
+}
+
+static inline void btn(const R& r, const char* lb, u32 col, u32 tc, bool en = true) {
+    u32 c = col;
+    if (!en) { c = 0xD1D5DB; tc = 0x8B93A1; }
+    else if (hov(r)) c = gfx::lerp(col, 0xFFFFFF, 1, 4);
+    gfx::round(r.x, r.y, r.w, r.h, 6, c);
+    text::draw_c(lb, r.x, r.y, r.w, r.h, tc, 1);
 }
