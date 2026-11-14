@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Mobile Portrait (Fixed Mouse & Touch)
+//  iMimi OS — Mobile Portrait (Fixed PS/2 Sign-Magnitude)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -22,7 +22,7 @@ struct multiboot_info {
 
 #include "images.h"
 
-// --- PS/2 МЫШЬ (по мотивам рабочего кода) ---
+// --- PS/2 МЫШЬ (Sign-Magnitude) ---
 namespace mouse {
     int x = 240, y = 400;
     u8  btn = 0;
@@ -38,8 +38,8 @@ namespace mouse {
         wait_w(); outb(0x64, 0xA8);
         wait_w(); outb(0x64, 0x20);
         u8 status = read();
-        status &= ~0x20;   // Включаем тактирование (Clock Enable)
-        status &= ~0x02;   // Запрещаем IRQ12 (мы polling)
+        status &= ~0x20;   // Включаем тактирование
+        status &= ~0x02;   // Запрещаем IRQ12
         wait_w(); outb(0x64, 0x60);
         wait_w(); outb(0x60, status);
         write(0xF6); read(); // Reset
@@ -51,12 +51,18 @@ namespace mouse {
         pkt[idx++] = b;
         if (idx < 3) return false;
         idx = 0;
-        int dx = pkt[1] - ((pkt[0] << 4) & 0x100);
-        int dy = pkt[2] - ((pkt[0] << 3) & 0x100);
+        
+        int dx = pkt[1];
+        if (pkt[0] & 0x10) dx = -dx;
+        int dy = pkt[2];
+        if (pkt[0] & 0x20) dy = -dy;
+
         x += dx;
-        y -= dy;
+        y -= dy; // Инверсия Y для экрана
+
         if (x < 0) x = 0; if (x > 479) x = 479;
         if (y < 0) y = 0; if (y > 799) y = 799;
+        
         btn = pkt[0] & 7;
         return true;
     }
@@ -223,7 +229,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     state = 1;
 
     while (1) {
-        // 1. Читаем PS/2 пока есть данные
         for (int i = 0; i < 32; i++) {
             u8 st = inb(0x64);
             if (!(st & 1)) break;
@@ -236,7 +241,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             }
         }
 
-        // 2. Детектор нажатия (только фронт)
         u8 cur_btn = mouse::btn;
         bool click = (cur_btn & 1) && !(prev_btn & 1);
         prev_btn = cur_btn;
@@ -246,7 +250,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         if (state == 1) {
             gfx::fill_screen(0x1A1A2E); gfx::fill_rect(0, 0, 480, 40, 0x111122);
             draw_string("12:00", 20, 15, 0xFFFFFF); draw_string("VOL:", 350, 15, 0x888888); draw_int(volume, 400, 15, 0xFFFFFF);
-            draw_string("v2", 460, 15, 0x666666);
+            draw_string("v3", 460, 15, 0x666666);
 
             if (use_hayricon) gfx::draw_image_scaled(30, 80, 100, 100, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
             else gfx::draw_image_scaled(30, 80, 100, 100, img_base_rle, img_base_size, img_base_w, img_base_h);
