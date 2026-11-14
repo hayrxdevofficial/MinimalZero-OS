@@ -7,8 +7,12 @@ OBJS     = boot.o kernel.o
 
 all: MinimalZero.iso
 
-images.h: tools/fetch_splash.sh tools/img2c.py
+# Явно указываем все 4 картинки, которые нужны для сборки
+img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg: tools/fetch_splash.sh
 	bash tools/fetch_splash.sh
+
+# images.h зависит от всех 4 картинок
+images.h: img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg tools/img2c.py
 	python3 tools/img2c.py
 
 boot.o: boot.asm
