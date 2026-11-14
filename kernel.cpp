@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Safe Interrupts & Settings
+//  iMimi OS — No Interrupts! (100% v86 Safe)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -39,72 +39,22 @@ int click_power_level = 0;
 int auto_click_timer = 0;
 
 bool power_menu_open = false;
-volatile u32 system_ticks = 0;
-
 u8 mouse_cycle = 0;
 u8 mouse_byte[3];
-
-// --- СИСТЕМНЫЕ ПРЕРЫВАНИЯ ---
-extern "C" void isr0();
-extern "C" void isr1();
-extern "C" void isr12();
-
-extern "C" void timer_handler_c() {
-    system_ticks++;
-    outb(0x20, 0x20);
-}
-
-// Заглушки: просто отправляем EOI (End of Interrupt) контроллеру
-asm(
-".global isr1\n isr1:\n pusha\n movb $0x20, %al\n outb %al, $0x20\n popa\n iret\n"
-".global isr12\n isr12:\n pusha\n movb $0x20, %al\n outb %al, $0xA0\n outb %al, $0x20\n popa\n iret\n"
-);
-asm(".global isr0\n isr0:\n pusha\n call timer_handler_c\n popa\n iret\n");
-
-void init_timer() {
-    // Настраиваем PIT
-    u32 divisor = 1193180 / 100;
-    outb(0x43, 0x36);
-    outb(0x40, (u8)(divisor & 0xFF));
-    outb(0x40, (u8)((divisor >> 8) & 0xFF));
-
-    // Разрешаем прерывания клавиатуры (IRQ1) и мыши (IRQ12) в PIC
-    outb(0x21, 0xF6);
-    outb(0xA1, 0xEF);
-
-    struct IDT_entry { u16 base_low; u16 sel; u8 zero; u8 flags; u16 base_high; } __attribute__((packed));
-    struct IDT_ptr { u16 limit; u32 base; } __attribute__((packed));
-    static IDT_entry idt[256];
-    static IDT_ptr idtp;
-
-    idtp.limit = (sizeof(IDT_entry) * 256) - 1; idtp.base = (u32)&idt;
-    for(int i = 0; i < 256; i++) { idt[i].base_low = 0; idt[i].sel = 0; idt[i].zero = 0; idt[i].flags = 0; idt[i].base_high = 0; }
-
-    u32 base0 = (u32)isr0;
-    idt[0x20].base_low = base0 & 0xFFFF; idt[0x20].sel = 0x08; idt[0x20].flags = 0x8E; idt[0x20].base_high = (base0 >> 16) & 0xFFFF;
-
-    u32 base1 = (u32)isr1;
-    idt[0x21].base_low = base1 & 0xFFFF; idt[0x21].sel = 0x08; idt[0x21].flags = 0x8E; idt[0x21].base_high = (base1 >> 16) & 0xFFFF;
-
-    u32 base12 = (u32)isr12;
-    idt[0x2C].base_low = base12 & 0xFFFF; idt[0x2C].sel = 0x08; idt[0x2C].flags = 0x8E; idt[0x2C].base_high = (base12 >> 16) & 0xFFFF;
-
-    asm volatile("lidt (%0)" :: "r"(&idtp));
-    asm volatile("sti");
-}
 
 void reboot() { outb(0x64, 0xFE); }
 void shutdown() { outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
-// --- ОПРОС ВВОДА (Ограниченный цикл) ---
+// --- БЕЗОПАСНЫЙ ОПРОС ВВОДА ---
 void poll_inputs() {
-    for (int i = 0; i < 16; i++) { // Читаем максимум 16 байт за кадр
+    for (int i = 0; i < 16; i++) {
         if (!(inb(0x64) & 1)) break;
         
         u8 status = inb(0x64);
         u8 data = inb(0x60);
 
         if (status & 0x20) {
+            // МЫШЬ
             if (!use_mouse && !use_touch) continue;
             mouse_byte[mouse_cycle++] = data;
             if (mouse_cycle == 3) {
@@ -118,6 +68,7 @@ void poll_inputs() {
                 }
             }
         } else {
+            // КЛАВИАТУРА
             if (!use_kb_mouse) {
                 if (data == 0x1C || data == 0x39) mouse_left_clicked = true;
                 continue;
@@ -200,7 +151,7 @@ namespace gfx {
     }
 }
 
-// --- ШРИФТ И ТЕКСТ ---
+// --- ШРИФТ ---
 static const u8 font8x8[95][8] = { 
     {0,0,0,0,0,0,0,0},{0x18,0x18,0x18,0x18,0,0,0x18,0},{0x6C,0x6C,0x6C,0,0,0,0,0},{0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0},
     {0x18,0x7E,0xC0,0x7C,0x06,0xFC,0x18,0},{0,0xC6,0xCC,0x18,0x30,0x66,0xC6,0},{0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0},
@@ -274,20 +225,23 @@ void draw_cursor(int x, int y) {
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
     (void)magic; 
     gfx::init(mb); 
-    init_timer();
     
     int state = 0; 
     int current_mimi = 0; 
     int squish_pixels = 0; 
     int clicker_dir = 0;     
 
-    while (system_ticks < 600) {
-        gfx::fill_screen(0xFFFFFF); 
-        gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 0);
-        int progress = (system_ticks * 400) / 600;
-        gfx::fill_rect(200, 500, 400, 20, 0xDDDDDD);
-        gfx::fill_rect(200, 500, progress, 20, 0x3498DB);
-        gfx::swap();
+    // 6 СЕКУНД ЗАГРУЗКИ ЧЕРЕЗ ПУСТОЙ ЦИКЛ (БЕЗ ТАЙМЕРА)
+    int progress = 0;
+    for(volatile u32 i = 0; i < 600000000; i++) {
+        if (i % 10000000 == 0 && progress < 400) {
+            gfx::fill_screen(0xFFFFFF); 
+            gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 0);
+            gfx::fill_rect(200, 500, 400, 20, 0xDDDDDD);
+            gfx::fill_rect(200, 500, progress, 20, 0x3498DB);
+            gfx::swap();
+            progress += 7;
+        }
     }
 
     state = 1; 
