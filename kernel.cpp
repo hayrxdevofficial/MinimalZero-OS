@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Smooth Desktop (Double Buffered, Fixed RLE)
+//  iMimi OS — Device Settings & Input Manager
 // ============================================================
 
 typedef unsigned char       u8;
@@ -9,6 +9,7 @@ typedef unsigned long long  u64;
 
 static inline void outb(u16 p, u8 v) { asm volatile("outb %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u8   inb(u16 p)       { u8 v; asm volatile("inb %1,%0" : "=a"(v) : "Nd"(p)); return v; }
+static inline void outw(u16 p, u16 v) { asm volatile("outw %0,%1" :: "a"(v), "Nd"(p)); }
 
 struct multiboot_info {
     u32 flags; u32 mem_lower, mem_upper; u32 boot_device, cmdline, mods_count, mods_addr;
@@ -21,29 +22,104 @@ struct multiboot_info {
 
 #include "images.h"
 
+// --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 int mouse_x = 400, mouse_y = 300;
 bool mouse_left_clicked = false;
 
-// --- БЕЗОПАСНЫЙ ОПРОС КЛАВИАТУРЫ ---
-void poll_keyboard() {
-    if (inb(0x64) & 1) { 
-        u8 scancode = inb(0x60);
-        if (scancode == 0x48 || scancode == 0x11) mouse_y -= 15; // Вверх
-        if (scancode == 0x50 || scancode == 0x1F) mouse_y += 15; // Вниз
-        if (scancode == 0x4B || scancode == 0x1E) mouse_x -= 15; // Влево
-        if (scancode == 0x4D || scancode == 0x20) mouse_x += 15; // Вправо
-        if (scancode == 0x1C || scancode == 0x39) mouse_left_clicked = true; // Enter/Space
-        if (scancode == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; } // Esc
+// Настройки ввода
+bool use_touch = false;
+bool use_mouse = true;
+bool use_kb_mouse = true;
+
+// Игровые переменные
+int coins = 0;
+bool unlocked_adult = false;
+bool unlocked_cool = false;
+bool has_auto_click = false;
+int auto_speed_level = 0;
+int click_power_level = 0;
+int auto_click_timer = 0;
+
+bool power_menu_open = false;
+volatile u32 system_ticks = 0;
+
+u8 mouse_cycle = 0;
+u8 mouse_byte[3];
+
+// --- ОПРОС ВВОДА ---
+void poll_inputs() {
+    // Опрос прерываний (в безопасном режиме)
+    while (inb(0x64) & 1) {
+        u8 status = inb(0x64);
+        u8 data = inb(0x60);
+
+        if (status & 0x20) {
+            // ДАННЫЕ ОТ МЫШИ (Touchpad v86)
+            if (!use_mouse && !use_touch) continue;
+            
+            mouse_byte[mouse_cycle++] = data;
+            if (mouse_cycle == 3) {
+                mouse_cycle = 0;
+                if (mouse_byte[0] & 0x01) mouse_left_clicked = true; // Клик
+                if (mouse_byte[0] & 0x08) {} // Переполнение X
+                else {
+                    int dx = (mouse_byte[0] & 0x10) ? (mouse_byte[1] - 256) : mouse_byte[1];
+                    int dy = (mouse_byte[0] & 0x20) ? (mouse_byte[2] - 256) : mouse_byte[2];
+                    mouse_x += dx;
+                    mouse_y -= dy; // Инверсия Y для экрана
+                }
+            }
+        } else {
+            // ДАННЫЕ ОТ КЛАВИАТУРЫ
+            if (!use_kb_mouse) {
+                if (data == 0x1C || data == 0x39) mouse_left_clicked = true; // Enter / Space
+                continue;
+            }
+            
+            if (data == 0x48 || data == 0x11) mouse_y -= 20; // Вверх
+            if (data == 0x50 || data == 0x1F) mouse_y += 20; // Вниз
+            if (data == 0x4B || data == 0x1E) mouse_x -= 20; // Влево
+            if (data == 0x4D || data == 0x20) mouse_x += 20; // Вправо
+            if (data == 0x1C || data == 0x39) mouse_left_clicked = true; // Enter/Space
+            if (data == 0x01) { mouse_x = 10; mouse_y = 10; mouse_left_clicked = true; } // Esc
+        }
     }
 }
 
-// --- ГРАФИКА (ДВОЙНАЯ БУФЕРИЗАЦИЯ) ---
+// --- СИСТЕМНЫЕ ФУНКЦИИ ---
+extern "C" void timer_handler_c() { system_ticks++; outb(0x20, 0x20); }
+asm(".global isr0\n isr0:\n pusha\n call timer_handler_c\n popa\n iret\n");
+
+void init_timer() {
+    u32 divisor = 1193180 / 100;
+    outb(0x43, 0x36);
+    outb(0x40, (u8)(divisor & 0xFF));
+    outb(0x40, (u8)((divisor >> 8) & 0xFF));
+
+    struct IDT_entry { u16 base_low; u16 sel; u8 zero; u8 flags; u16 base_high; } __attribute__((packed));
+    struct IDT_ptr { u16 limit; u32 base; } __attribute__((packed));
+    static IDT_entry idt[256];
+    static IDT_ptr idtp;
+
+    idtp.limit = (sizeof(IDT_entry) * 256) - 1; idtp.base = (u32)&idt;
+    for(int i = 0; i < 256; i++) { idt[i].base_low = 0; idt[i].sel = 0; idt[i].zero = 0; idt[i].flags = 0; idt[i].base_high = 0; }
+
+    extern "C" void isr0();
+    u32 base = (u32)isr0;
+    idt[0x20].base_low = base & 0xFFFF; idt[0x20].sel = 0x08; idt[0x20].flags = 0x8E; idt[0x20].base_high = (base >> 16) & 0xFFFF;
+
+    asm volatile("lidt (%0)" :: "r"(&idtp));
+    asm volatile("sti");
+}
+
+void reboot() { outb(0x64, 0xFE); }
+void shutdown() { outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
+
+// --- ГРАФИКА ---
 namespace gfx {
     static u8* fb = nullptr; 
     static u32 W = 800, H = 600, pitch = 0; 
     static u8 bpp = 32;
-    
-    // Буфер в памяти (1.8 МБ). Рисуем сначала сюда.
     static u32 back_buffer[800 * 600]; 
 
     void init(multiboot_info* mb) {
@@ -54,7 +130,6 @@ namespace gfx {
         }
     }
 
-    // Рисуем в буфер памяти
     inline void put_pixel(u32 x, u32 y, u32 color) {
         if (x >= W || y >= H) return;
         back_buffer[y * W + x] = color;
@@ -63,7 +138,6 @@ namespace gfx {
     void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) {
         for (u32 j = 0; j < h; j++) for (u32 i = 0; i < w; i++) put_pixel(x + i, y + j, color);
     }
-    
     void fill_screen(u32 color) { fill_rect(0, 0, W, H, color); }
 
     inline u32 rgb565_to_888(u16 c) {
@@ -71,44 +145,39 @@ namespace gfx {
         return (r << 16) | (g << 8) | b;
     }
 
-    // ИСПРАВЛЕННЫЙ ДЕКОДЕР (теперь картинки будут нормальными)
-    void draw_image_centered(int target_h, const u16* rle, u32 rle_size, int img_w, int img_h, int squish_percent) {
-        int draw_h = (target_h * squish_percent) / 100;
-        int draw_w = (img_w * draw_h) / img_h; 
-        int ox = (W - draw_w) / 2;
-        int oy = (H - draw_h) / 2 - 30;
-
+    void draw_image_scaled(int ox, int oy, int draw_w, int draw_h, const u16* rle, u32 rle_size, int img_w, int img_h) {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < rle_size) {
             u16 header = rle[idx++];
-            if (header & 0x8000) {
-                // Это серия (Run). Читаем цвет ОДИН раз.
-                u32 len = header & 0x7FFF;
+            u32 len = (header & 0x8000) ? (header & 0x7FFF) : header;
+            for (u32 i = 0; i < len; i++) {
                 u32 col = rgb565_to_888(rle[idx++]);
-                for (u32 i = 0; i < len; i++) {
-                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                    if (++x >= img_w) { x = 0; y++; }
-                }
-            } else {
-                // Это буквальные пиксели. Читаем каждый цвет.
-                u32 len = header;
-                for (u32 i = 0; i < len; i++) {
-                    u32 col = rgb565_to_888(rle[idx++]);
-                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                    if (++x >= img_w) { x = 0; y++; }
-                }
+                put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                if (++x >= img_w) { x = 0; y++; }
             }
         }
     }
 
-    // Вывод готового кадра на экран (вызывается в конце каждого цикла)
+    void draw_image_centered(int target_h, const u16* rle, u32 rle_size, int img_w, int img_h, int squish_pixels) {
+        int draw_h = target_h - squish_pixels;
+        int draw_w = (img_w * draw_h) / img_h; 
+        int ox = (W - draw_w) / 2;
+        int oy = (H - draw_h) / 2 - 30;
+        draw_image_scaled(ox, oy, draw_w, draw_h, rle, rle_size, img_w, img_h);
+    }
+
     void swap() {
         if (!fb) return;
         u32* dest = (u32*)fb;
+        u32* src = back_buffer;
         u32 p32 = pitch / 4;
-        for (u32 y = 0; y < H; y++) {
-            for (u32 x = 0; x < W; x++) {
-                dest[y * p32 + x] = back_buffer[y * W + x];
+        if (p32 == W) {
+            for (u32 i = 0; i < W * H; i++) dest[i] = src[i];
+        } else {
+            for (u32 y = 0; y < H; y++) {
+                u32* row_dest = dest + (y * p32);
+                u32* row_src = src + (y * W);
+                for (u32 x = 0; x < W; x++) row_dest[x] = row_src[x];
             }
         }
     }
@@ -149,41 +218,35 @@ static const u8 font8x8[95][8] = {
     {0xE0,0x18,0x18,0x1C,0x18,0x18,0xE0,0},{0x76,0xDC,0,0,0,0,0,0}
 };
 
+void draw_char(char c, int x, int y, u32 color) {
+    if (c < 32 || c > 126) c = '?';
+    const u8* g = font8x8[c - 32];
+    for (int r = 0; r < 8; r++) for (int cl = 0; cl < 8; cl++)
+        if (g[r] & (1 << (7 - cl))) gfx::put_pixel(x + cl, y + r, color);
+}
 void draw_string(const char* s, int x, int y, u32 color) {
-    while (*s) {
-        char c = *s++; if (c < 32 || c > 126) c = '?';
-        const u8* g = font8x8[c - 32];
-        for (int r = 0; r < 8; r++) for (int cl = 0; cl < 8; cl++)
-            if (g[r] & (1 << (7 - cl))) gfx::put_pixel(x + cl, y + r, color);
-        x += 8;
-    }
+    while (*s) { draw_char(*s++, x, y, color); x += 8; }
+}
+void draw_int(int num, int x, int y, u32 color) {
+    char buf[12]; int i = 0;
+    if (num == 0) buf[i++] = '0';
+    while (num > 0) { buf[i++] = '0' + (num % 10); num /= 10; }
+    while (i > 0) { i--; draw_char(buf[i], x, y, color); x += 8; }
 }
 
-// --- КРАСИВАЯ МЫШКА (Стрелочка) ---
 void draw_cursor(int x, int y) {
-    // 1 = черный контур, 2 = белая заливка
     static const u8 cursor[16][12] = {
-        {1,0,0,0,0,0,0,0,0,0,0,0},
-        {1,1,0,0,0,0,0,0,0,0,0,0},
-        {1,2,1,0,0,0,0,0,0,0,0,0},
-        {1,2,2,1,0,0,0,0,0,0,0,0},
-        {1,2,2,2,1,0,0,0,0,0,0,0},
-        {1,2,2,2,2,1,0,0,0,0,0,0},
-        {1,2,2,2,2,2,1,0,0,0,0,0},
-        {1,2,2,2,2,2,2,1,0,0,0,0},
-        {1,2,2,2,2,2,2,2,1,0,0,0},
-        {1,2,2,2,2,2,2,2,2,1,0,0},
-        {1,2,2,2,2,1,1,1,1,1,1,0},
-        {1,2,1,2,2,1,0,0,0,0,0,0},
-        {1,1,0,1,2,2,1,0,0,0,0,0},
-        {1,0,0,0,1,2,2,1,0,0,0,0},
-        {0,0,0,0,1,2,2,1,0,0,0,0},
+        {1,0,0,0,0,0,0,0,0,0,0,0},{1,1,0,0,0,0,0,0,0,0,0,0},{1,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0},{1,2,2,2,1,0,0,0,0,0,0,0},{1,2,2,2,2,1,0,0,0,0,0,0},
+        {1,2,2,2,2,2,1,0,0,0,0,0},{1,2,2,2,2,2,2,1,0,0,0,0},{1,2,2,2,2,2,2,2,1,0,0,0},
+        {1,2,2,2,2,2,2,2,2,1,0,0},{1,2,2,2,2,1,1,1,1,1,1,0},{1,2,1,2,2,1,0,0,0,0,0,0},
+        {1,1,0,1,2,2,1,0,0,0,0,0},{1,0,0,0,1,2,2,1,0,0,0,0},{0,0,0,0,1,2,2,1,0,0,0,0},
         {0,0,0,0,0,1,1,0,0,0,0,0}
     };
     for (int j = 0; j < 16; j++) {
         for (int i = 0; i < 12; i++) {
-            if (cursor[j][i] == 1) gfx::put_pixel(x + i, y + j, 0x000000); // Черный
-            if (cursor[j][i] == 2) gfx::put_pixel(x + i, y + j, 0xFFFFFF); // Белый
+            if (cursor[j][i] == 1) gfx::put_pixel(x + i, y + j, 0x000000);
+            if (cursor[j][i] == 2) gfx::put_pixel(x + i, y + j, 0xFFFFFF);
         }
     }
 }
@@ -194,112 +257,199 @@ void draw_cursor(int x, int y) {
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
     (void)magic; 
     gfx::init(mb); 
+    init_timer();
     
-    int state = 0; 
+    int state = 0; // 0=Boot, 1=Desktop, 2=Clicker, 3=Files, 4=Settings
     int current_mimi = 0; 
-    int clicker_squish = 100; 
+    int squish_pixels = 0; 
     int clicker_dir = 0;     
 
+    while (system_ticks < 600) {
+        gfx::fill_screen(0xFFFFFF); 
+        gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 0);
+        int progress = (system_ticks * 400) / 600;
+        gfx::fill_rect(200, 500, 400, 20, 0xDDDDDD);
+        gfx::fill_rect(200, 500, progress, 20, 0x3498DB);
+        gfx::swap();
+    }
+
+    state = 1; 
+
     while (1) {
-        poll_keyboard(); 
+        poll_inputs(); 
         bool click = mouse_left_clicked; 
         mouse_left_clicked = false;
 
         if (mouse_x < 0) mouse_x = 0; if (mouse_x > 799) mouse_x = 799;
         if (mouse_y < 0) mouse_y = 0; if (mouse_y > 599) mouse_y = 599;
 
-        if (state == 0) {
-            gfx::fill_screen(0xFFFFFF); 
-            gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 100);
-            gfx::swap(); // Показываем загрузку
-            
-            // Имитация загрузки
-            for(volatile int i=0; i<100000000; i++);
-            state = 1; 
-        } 
-        else if (state == 1) {
+        if (state == 1) {
+            // РАБОЧИЙ СТОЛ
             gfx::fill_screen(0x1A1A2E); 
-
-            // Верхняя панель
             gfx::fill_rect(0, 0, 800, 30, 0x111122);
-            draw_string("12:00", 20, 10, 0xFFFFFF); // Фиксированное время, чтобы не висло
-            draw_string("АВТО", 700, 10, 0x00FF00); 
-            draw_string("English", 750, 10, 0xAAAAAA); 
-
-            // Иконка игры
-            int ix = 50, iy = 70, iw = 80, ih = 80;
-            bool is_hover = (mouse_x >= ix && mouse_x <= ix + iw && mouse_y >= iy && mouse_y <= iy + ih);
-
-            if (is_hover) {
-                gfx::fill_rect(ix + 4, iy + 4, iw, ih, 0x3498DB); 
-                draw_string("Mimi Clicker", ix - 10, iy + 90, 0xFFFFFF);
-                
-                // Инфо-панель
-                gfx::fill_rect(200, 70, 500, 150, 0x222233);
-                draw_string("Creator: Hayrulla004004_Dev (His Fan TYPH)", 220, 90, 0xFFFFFF);
-                draw_string("App Version: 1.0.2", 220, 120, 0xAAAAAA);
-            } else {
-                gfx::fill_rect(ix, iy, iw, ih, 0x3498DB);
-                draw_string("Mimi Clicker", ix - 10, iy + 90, 0xFFFFFF);
-            }
-            draw_string("Mimi", ix + 20, iy + 35, 0xFFFFFF);
-
-            if (click && mouse_x >= ix && mouse_x <= ix + iw && mouse_y >= iy && mouse_y <= iy + ih) {
-                state = 2;
-            }
-        } 
-        else if (state == 2) {
-            gfx::fill_screen(0xFFFFFF); 
             
-            draw_string("Mimi Clicker", 350, 30, 0x000000);
-            draw_string("[ESC] to exit", 700, 30, 0xAAAAAA);
+            draw_string("12:00", 20, 10, 0xFFFFFF); 
+            draw_string("RAM: 8 MB / 1024 MB", 200, 10, 0x888888);
             
-            // Кнопки
-            gfx::fill_rect(50, 520, 150, 40, 0xEEEEEE);
-            draw_string("Mini", 100, 535, 0x000000);
-            gfx::fill_rect(250, 520, 150, 40, 0xEEEEEE);
-            draw_string("Adult", 290, 535, 0x000000);
-            gfx::fill_rect(450, 520, 150, 40, 0xEEEEEE);
-            draw_string("Cool", 500, 535, 0x000000);
+            gfx::fill_rect(750, 0, 50, 30, 0x333333);
+            draw_string("PWR", 760, 10, 0xFFFFFF);
+
+            gfx::draw_image_scaled(50, 70, 80, 80, img_base_rle, img_base_size, img_base_w, img_base_h);
+            draw_string("Mimi Clicker", 40, 160, 0xFFFFFF);
+
+            gfx::fill_rect(160, 70, 80, 80, 0x4CAF50);
+            draw_string("Files", 180, 110, 0xFFFFFF);
+            draw_string("Files", 180, 160, 0xFFFFFF);
 
             if (click) {
-                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) current_mimi = 0;
-                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 560) current_mimi = 1;
-                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 560) current_mimi = 2;
-                if (mouse_x < 40 && mouse_y < 40) state = 1; 
+                if (mouse_x >= 50 && mouse_x <= 130 && mouse_y >= 70 && mouse_y <= 150) state = 2; 
+                if (mouse_x >= 160 && mouse_x <= 240 && mouse_y >= 70 && mouse_y <= 150) state = 3; 
+                if (mouse_x >= 750 && mouse_y <= 30) power_menu_open = !power_menu_open;
+            }
+
+        } else if (state == 2) {
+            // CLICKER
+            gfx::fill_screen(0xFFFFFF); 
+            gfx::fill_rect(10, 10, 60, 30, 0xEEEEEE);
+            draw_string("< Back", 15, 20, 0x000000);
+            
+            draw_string("Mimi Clicker", 350, 20, 0x000000);
+            draw_string("Coins: ", 600, 20, 0xFFAA00);
+            draw_int(coins, 660, 20, 0xFFAA00);
+
+            if (has_auto_click) {
+                auto_click_timer++;
+                int target_time = 100 - (auto_speed_level * 30); 
+                if (target_time < 10) target_time = 10;
+                if (auto_click_timer >= target_time) {
+                    auto_click_timer = 0;
+                    coins += (click_power_level > 0) ? 2 : 1; 
+                }
+            }
+
+            gfx::fill_rect(50, 460, 150, 40, unlocked_adult ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(unlocked_adult ? "Adult (Owned)" : "Buy Adult", 60, 475, 0x000000);
+            gfx::fill_rect(250, 460, 150, 40, unlocked_cool ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(unlocked_cool ? "Cool (Owned)" : "Buy Cool", 270, 475, 0x000000);
+            gfx::fill_rect(450, 460, 150, 40, 0xEEEEEE);
+            draw_string("Use Mini", 480, 475, 0x000000);
+
+            gfx::fill_rect(50, 520, 150, 40, has_auto_click ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(has_auto_click ? "Auto (Owned)" : "Buy Auto", 70, 535, 0x000000);
+            int speed_cost = 20 + (auto_speed_level * 10);
+            gfx::fill_rect(250, 520, 150, 40, 0xEEEEEE);
+            draw_string("Speed +1", 280, 535, 0x000000);
+            draw_int(speed_cost, 370, 535, 0x888888);
+            gfx::fill_rect(450, 520, 150, 40, click_power_level > 0 ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(click_power_level > 0 ? "Power (Max)" : "Power +1", 480, 535, 0x000000);
+
+            if (click) {
+                if (mouse_x >= 10 && mouse_x <= 70 && mouse_y >= 10 && mouse_y <= 40) state = 1;
+                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_adult) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_adult = true; current_mimi = 1; } }
+                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; } }
+                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 460 && mouse_y <= 500) current_mimi = 0;
+                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; } }
+                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 560) { if (coins >= speed_cost) { coins -= speed_cost; auto_speed_level++; } }
+                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 560) { if (click_power_level == 0 && coins >= 30) { coins -= 30; click_power_level = 1; } }
             }
 
             int ox = 0, oy = 0, draw_w = 0, draw_h = 0;
-            if (current_mimi == 0) {
-                draw_h = 250 * clicker_squish / 100; draw_w = img_base_w * draw_h / img_base_h;
-                gfx::draw_image_centered(250, img_base_rle, img_base_size, img_base_w, img_base_h, clicker_squish);
-            } else if (current_mimi == 1) {
-                draw_h = 250 * clicker_squish / 100; draw_w = img_adult_w * draw_h / img_adult_h;
-                gfx::draw_image_centered(250, img_adult_rle, img_adult_size, img_adult_w, img_adult_h, clicker_squish);
-            } else {
-                draw_h = 250 * clicker_squish / 100; draw_w = img_cool_w * draw_h / img_cool_h;
-                gfx::draw_image_centered(250, img_cool_rle, img_cool_size, img_cool_w, img_cool_h, clicker_squish);
-            }
+            if (current_mimi == 0) { draw_h = 220 - squish_pixels; draw_w = img_base_w * draw_h / img_base_h; gfx::draw_image_centered(220, img_base_rle, img_base_size, img_base_w, img_base_h, squish_pixels); }
+            else if (current_mimi == 1) { draw_h = 220 - squish_pixels; draw_w = img_adult_w * draw_h / img_adult_h; gfx::draw_image_centered(220, img_adult_rle, img_adult_size, img_adult_w, img_adult_h, squish_pixels); }
+            else { draw_h = 220 - squish_pixels; draw_w = img_cool_w * draw_h / img_cool_h; gfx::draw_image_centered(220, img_cool_rle, img_cool_size, img_cool_w, img_cool_h, squish_pixels); }
 
-            ox = (800 - draw_w) / 2; oy = (600 - draw_h) / 2 - 30;
-
+            ox = (800 - draw_w) / 2; oy = (600 - draw_h) / 2 - 50;
             if (click && mouse_x >= ox && mouse_x <= ox + draw_w && mouse_y >= oy && mouse_y <= oy + draw_h) {
-                clicker_squish = 80; clicker_dir = 1;    
+                coins += (click_power_level > 0) ? 2 : 1; 
+                squish_pixels = 4; 
+                clicker_dir = 1;    
             }
-
             if (clicker_dir == 1) {
-                clicker_squish += 1;
-                if (clicker_squish >= 100) { clicker_squish = 100; clicker_dir = 0; }
+                for(volatile int i=0; i<1000000; i++); 
+                squish_pixels--;
+                if (squish_pixels <= 0) { squish_pixels = 0; clicker_dir = 0; }
+            }
+        } else if (state == 3) {
+            // ФАЙЛЫ
+            gfx::fill_screen(0x1A1A2E);
+            int wx = 150, wy = 100, ww = 500, wh = 350;
+            gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
+            gfx::fill_rect(wx, wy, ww, 30, 0x3498DB);
+            draw_string("Files - 5 GB Drive", wx + 10, wy + 10, 0xFFFFFF);
+            gfx::fill_rect(wx + ww - 30, wy + 5, 20, 20, 0xE74C3C);
+            draw_string("X", wx + ww - 25, wy + 10, 0xFFFFFF);
+
+            draw_string("Total Space: 5.0 GB", wx + 30, wy + 60, 0x000000);
+            draw_string("Used Space:  0.1 GB", wx + 30, wy + 90, 0x000000);
+            draw_string("Free Space:  4.9 GB", wx + 30, wy + 120, 0x000000);
+            
+            gfx::fill_rect(wx + 30, wy + 160, 440, 20, 0xEEEEEE);
+            gfx::fill_rect(wx + 30, wy + 160, 10, 20, 0x4CAF50);
+
+            draw_string("Documents", wx + 30, wy + 220, 0x000000);
+            draw_string("Pictures", wx + 30, wy + 250, 0x000000);
+
+            if (click) {
+                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) state = 1;
+            }
+        } else if (state == 4) {
+            // НАСТРОЙКИ УСТРОЙСТВА
+            gfx::fill_screen(0x1A1A2E);
+            int wx = 200, wy = 150, ww = 400, wh = 300;
+            gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
+            gfx::fill_rect(wx, wy, ww, 30, 0x333333);
+            draw_string("My Device Settings", wx + 10, wy + 10, 0xFFFFFF);
+            
+            gfx::fill_rect(wx + ww - 30, wy + 5, 20, 20, 0xE74C3C);
+            draw_string("X", wx + ww - 25, wy + 10, 0xFFFFFF);
+
+            // Touchscreen
+            gfx::fill_rect(wx + 20, wy + 60, 360, 40, use_touch ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Touchscreen", wx + 30, wy + 75, use_touch ? 0xFFFFFF : 0x000000);
+            draw_string(use_touch ? "ON" : "OFF", wx + 310, wy + 75, use_touch ? 0xFFFFFF : 0x000000);
+
+            // Mouse
+            gfx::fill_rect(wx + 20, wy + 120, 360, 40, use_mouse ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Mouse", wx + 30, wy + 135, use_mouse ? 0xFFFFFF : 0x000000);
+            draw_string(use_mouse ? "ON" : "OFF", wx + 310, wy + 135, use_mouse ? 0xFFFFFF : 0x000000);
+
+            // Keyboard Mouse
+            gfx::fill_rect(wx + 20, wy + 180, 360, 40, use_kb_mouse ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Keyboard Mouse", wx + 30, wy + 195, use_kb_mouse ? 0xFFFFFF : 0x000000);
+            draw_string(use_kb_mouse ? "ON" : "OFF", wx + 310, wy + 195, use_kb_mouse ? 0xFFFFFF : 0x000000);
+
+            if (click) {
+                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) state = 1; // Закрыть
+                
+                // Переключатели
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 60 && mouse_y <= wy + 100) use_touch = !use_touch;
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 120 && mouse_y <= wy + 160) use_mouse = !use_mouse;
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 180 && mouse_y <= wy + 220) use_kb_mouse = !use_kb_mouse;
             }
         }
 
-        // Рисуем красивую мышку поверх всего кадра
-        draw_cursor(mouse_x, mouse_y);
+        // Меню PWR
+        if (power_menu_open) {
+            gfx::fill_rect(650, 35, 150, 130, 0x333333);
+            
+            gfx::fill_rect(660, 45, 130, 30, 0x555555);
+            draw_string("Settings", 680, 55, 0xFFFFFF);
 
-        // ВЫВОДИМ КАДР НА ЭКРАН (Все мерцание исчезнет)
+            gfx::fill_rect(660, 85, 130, 30, 0xE74C3C);
+            draw_string("Restart", 690, 95, 0xFFFFFF);
+            
+            gfx::fill_rect(660, 125, 130, 30, 0xE74C3C);
+            draw_string("Shutdown", 690, 135, 0xFFFFFF);
+
+            if (click) {
+                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 45 && mouse_y <= 75) { state = 4; power_menu_open = false; }
+                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 85 && mouse_y <= 115) reboot();
+                if (mouse_x >= 660 && mouse_x <= 790 && mouse_y >= 125 && mouse_y <= 155) shutdown();
+                if (mouse_x < 650 || mouse_x > 800 || mouse_y > 165) power_menu_open = false;
+            }
+        }
+
+        draw_cursor(mouse_x, mouse_y);
         gfx::swap();
-        
-        // Небольшая пауза, чтобы v86 не перегревался
-        for(volatile int i=0; i<1000000; i++);
     }
 }
