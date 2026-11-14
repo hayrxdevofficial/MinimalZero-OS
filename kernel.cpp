@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Fixed RLE & Teen Edition
+//  iMimi OS — Calculator, HayrICons & Dynamic Boot (Dark Mode)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -29,9 +29,10 @@ bool mouse_left_clicked = false;
 bool use_touch = false;
 bool use_mouse = true;
 bool use_kb_mouse = true;
+bool use_hayricon = false;
 
 int coins = 0;
-bool unlocked_teen = false; // Переименовали Adult в Teen
+bool unlocked_teen = false;
 bool unlocked_cool = false;
 bool has_auto_click = false;
 int auto_speed_level = 0;
@@ -42,17 +43,20 @@ bool power_menu_open = false;
 u8 mouse_cycle = 0;
 u8 mouse_byte[3];
 
+// Переменные калькулятора
+long long calc_display = 0;
+long long calc_stored = 0;
+int calc_op = 0; 
+bool calc_new_num = true;
+
 void reboot() { outb(0x64, 0xFE); }
 void shutdown() { outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
-// --- БЕЗОПАСНЫЙ ОПРОС ВВОДА ---
 void poll_inputs() {
     for (int i = 0; i < 16; i++) {
         if (!(inb(0x64) & 1)) break;
-        
         u8 status = inb(0x64);
         u8 data = inb(0x60);
-
         if (status & 0x20) {
             if (!use_mouse && !use_touch) continue;
             mouse_byte[mouse_cycle++] = data;
@@ -62,15 +66,11 @@ void poll_inputs() {
                 if (!(mouse_byte[0] & 0x08)) {
                     int dx = (mouse_byte[0] & 0x10) ? (mouse_byte[1] - 256) : mouse_byte[1];
                     int dy = (mouse_byte[0] & 0x20) ? (mouse_byte[2] - 256) : mouse_byte[2];
-                    mouse_x += dx;
-                    mouse_y -= dy;
+                    mouse_x += dx; mouse_y -= dy;
                 }
             }
         } else {
-            if (!use_kb_mouse) {
-                if (data == 0x1C || data == 0x39) mouse_left_clicked = true;
-                continue;
-            }
+            if (!use_kb_mouse) { if (data == 0x1C || data == 0x39) mouse_left_clicked = true; continue; }
             if (data == 0x48 || data == 0x11) mouse_y -= 20;
             if (data == 0x50 || data == 0x1F) mouse_y += 20;
             if (data == 0x4B || data == 0x1E) mouse_x -= 20;
@@ -90,20 +90,12 @@ namespace gfx {
 
     void init(multiboot_info* mb) {
         if (mb->flags & (1u << 12)) {
-            fb = (u8*)(u32)mb->framebuffer_addr; 
-            W = mb->framebuffer_width; H = mb->framebuffer_height;
+            fb = (u8*)(u32)mb->framebuffer_addr; W = mb->framebuffer_width; H = mb->framebuffer_height;
             pitch = mb->framebuffer_pitch; bpp = mb->framebuffer_bpp;
         }
     }
-
-    inline void put_pixel(u32 x, u32 y, u32 color) {
-        if (x >= W || y >= H) return;
-        back_buffer[y * W + x] = color;
-    }
-
-    void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) {
-        for (u32 j = 0; j < h; j++) for (u32 i = 0; i < w; i++) put_pixel(x + i, y + j, color);
-    }
+    inline void put_pixel(u32 x, u32 y, u32 color) { if (x >= W || y >= H) return; back_buffer[y * W + x] = color; }
+    void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) { for (u32 j = 0; j < h; j++) for (u32 i = 0; i < w; i++) put_pixel(x + i, y + j, color); }
     void fill_screen(u32 color) { fill_rect(0, 0, W, H, color); }
 
     inline u32 rgb565_to_888(u16 c) {
@@ -111,27 +103,15 @@ namespace gfx {
         return (r << 16) | (g << 8) | b;
     }
 
-    // ИСПРАВЛЕННЫЙ ДЕКОДЕР RLE
     void draw_image_scaled(int ox, int oy, int draw_w, int draw_h, const u16* rle, u32 rle_size, int img_w, int img_h) {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < rle_size) {
             u16 header = rle[idx++];
-            if (header & 0x8000) {
-                // Если это серия (Run), читаем цвет ОДИН раз
-                u32 len = header & 0x7FFF;
+            u32 len = (header & 0x8000) ? (header & 0x7FFF) : header;
+            for (u32 i = 0; i < len; i++) {
                 u32 col = rgb565_to_888(rle[idx++]);
-                for (u32 i = 0; i < len; i++) {
-                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                    if (++x >= img_w) { x = 0; y++; }
-                }
-            } else {
-                // Если это одиночные пиксели, читаем цвет для КАЖДОГО
-                u32 len = header;
-                for (u32 i = 0; i < len; i++) {
-                    u32 col = rgb565_to_888(rle[idx++]);
-                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                    if (++x >= img_w) { x = 0; y++; }
-                }
+                put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                if (++x >= img_w) { x = 0; y++; }
             }
         }
     }
@@ -146,22 +126,17 @@ namespace gfx {
 
     void swap() {
         if (!fb) return;
-        u32* dest = (u32*)fb;
-        u32* src = back_buffer;
-        u32 p32 = pitch / 4;
-        if (p32 == W) {
-            for (u32 i = 0; i < W * H; i++) dest[i] = src[i];
-        } else {
+        u32* dest = (u32*)fb; u32* src = back_buffer; u32 p32 = pitch / 4;
+        if (p32 == W) { for (u32 i = 0; i < W * H; i++) dest[i] = src[i]; }
+        else {
             for (u32 y = 0; y < H; y++) {
-                u32* row_dest = dest + (y * p32);
-                u32* row_src = src + (y * W);
+                u32* row_dest = dest + (y * p32); u32* row_src = src + (y * W);
                 for (u32 x = 0; x < W; x++) row_dest[x] = row_src[x];
             }
         }
     }
 }
 
-// --- ШРИФТ ---
 static const u8 font8x8[95][8] = { 
     {0,0,0,0,0,0,0,0},{0x18,0x18,0x18,0x18,0,0,0x18,0},{0x6C,0x6C,0x6C,0,0,0,0,0},{0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0},
     {0x18,0x7E,0xC0,0x7C,0x06,0xFC,0x18,0},{0,0xC6,0xCC,0x18,0x30,0x66,0xC6,0},{0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0},
@@ -205,10 +180,12 @@ void draw_char(char c, int x, int y, u32 color) {
 void draw_string(const char* s, int x, int y, u32 color) {
     while (*s) { draw_char(*s++, x, y, color); x += 8; }
 }
-void draw_int(int num, int x, int y, u32 color) {
-    char buf[12]; int i = 0;
-    if (num == 0) buf[i++] = '0';
+void draw_int(long long num, int x, int y, u32 color) {
+    char buf[24]; int i = 0;
+    if (num == 0) { draw_char('0', x, y, color); return; }
+    bool neg = num < 0; if (neg) num = -num;
     while (num > 0) { buf[i++] = '0' + (num % 10); num /= 10; }
+    if (neg) buf[i++] = '-';
     while (i > 0) { i--; draw_char(buf[i], x, y, color); x += 8; }
 }
 
@@ -241,14 +218,20 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     int squish_pixels = 0; 
     int clicker_dir = 0;     
 
-    // 6 СЕКУНД ЗАГРУЗКИ
+    // ДИНАМИЧЕСКАЯ ЗАГРУЗКА (Черно-серая для Hayrulla)
+    u32 boot_bg = use_hayricon ? 0x121212 : 0xFFFFFF; // Темно-серый / Белый
+    u32 bar_bg = use_hayricon ? 0x333333 : 0xDDDDDD;  // Серый фон бара / Светло-серый
+    u32 bar_color = use_hayricon ? 0xFFFFFF : 0xFF69B4; // Белый / Розовый
+
     int progress = 0;
     for(volatile u32 i = 0; i < 600000000; i++) {
         if (i % 10000000 == 0 && progress < 400) {
-            gfx::fill_screen(0xFFFFFF); 
-            gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 0);
-            gfx::fill_rect(200, 500, 400, 20, 0xDDDDDD);
-            gfx::fill_rect(200, 500, progress, 20, 0x3498DB);
+            gfx::fill_screen(boot_bg); 
+            if (use_hayricon) gfx::draw_image_centered(300, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h, 0);
+            else gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 0);
+            
+            gfx::fill_rect(200, 500, 400, 20, bar_bg);
+            gfx::fill_rect(200, 500, progress, 20, bar_color);
             gfx::swap();
             progress += 7;
         }
@@ -276,16 +259,22 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             gfx::fill_rect(750, 0, 50, 30, 0x333333);
             draw_string("PWR", 760, 10, 0xFFFFFF);
 
-            gfx::draw_image_scaled(50, 70, 80, 80, img_base_rle, img_base_size, img_base_w, img_base_h);
+            if (use_hayricon) gfx::draw_image_scaled(50, 70, 80, 80, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
+            else gfx::draw_image_scaled(50, 70, 80, 80, img_base_rle, img_base_size, img_base_w, img_base_h);
             draw_string("Mimi Clicker", 40, 160, 0xFFFFFF);
 
             gfx::fill_rect(160, 70, 80, 80, 0x4CAF50);
             draw_string("Files", 180, 110, 0xFFFFFF);
             draw_string("Files", 180, 160, 0xFFFFFF);
 
+            gfx::fill_rect(270, 70, 80, 80, 0x9E9E9E);
+            draw_string("Calc", 285, 110, 0x000000);
+            draw_string("Calc", 285, 160, 0xFFFFFF);
+
             if (click) {
                 if (mouse_x >= 50 && mouse_x <= 130 && mouse_y >= 70 && mouse_y <= 150) { state = 2; }
                 if (mouse_x >= 160 && mouse_x <= 240 && mouse_y >= 70 && mouse_y <= 150) { state = 3; }
+                if (mouse_x >= 270 && mouse_x <= 350 && mouse_y >= 70 && mouse_y <= 150) { state = 5; calc_display = 0; calc_new_num = true; }
                 if (mouse_x >= 750 && mouse_y <= 30) { power_menu_open = !power_menu_open; }
             }
 
@@ -293,7 +282,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             gfx::fill_screen(0xFFFFFF); 
             gfx::fill_rect(10, 10, 60, 30, 0xEEEEEE);
             draw_string("< Back", 15, 20, 0x000000);
-            
             draw_string("Mimi Clicker", 350, 20, 0x000000);
             draw_string("Coins: ", 600, 20, 0xFFAA00);
             draw_int(coins, 660, 20, 0xFFAA00);
@@ -302,13 +290,9 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 auto_click_timer++;
                 int target_time = 100 - (auto_speed_level * 30); 
                 if (target_time < 10) target_time = 10;
-                if (auto_click_timer >= target_time) {
-                    auto_click_timer = 0;
-                    coins += (click_power_level > 0) ? 2 : 1; 
-                }
+                if (auto_click_timer >= target_time) { auto_click_timer = 0; coins += (click_power_level > 0) ? 2 : 1; }
             }
 
-            // Заменили Adult на Teen
             gfx::fill_rect(50, 460, 150, 40, unlocked_teen ? 0xCCCCCC : 0xEEEEEE);
             draw_string(unlocked_teen ? "Teen (Owned)" : "Buy Teen", 60, 475, 0x000000);
             gfx::fill_rect(250, 460, 150, 40, unlocked_cool ? 0xCCCCCC : 0xEEEEEE);
@@ -327,7 +311,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
 
             if (click) {
                 if (mouse_x >= 10 && mouse_x <= 70 && mouse_y >= 10 && mouse_y <= 40) { state = 1; }
-                // Клики по магазину
                 if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_teen) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_teen = true; current_mimi = 1; } }
                 if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; } }
                 if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 460 && mouse_y <= 500) { current_mimi = 0; }
@@ -344,8 +327,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             ox = (800 - draw_w) / 2; oy = (600 - draw_h) / 2 - 50;
             if (click && mouse_x >= ox && mouse_x <= ox + draw_w && mouse_y >= oy && mouse_y <= oy + draw_h) {
                 coins += (click_power_level > 0) ? 2 : 1; 
-                squish_pixels = 4; 
-                clicker_dir = 1;    
+                squish_pixels = 4; clicker_dir = 1;    
             }
             if (clicker_dir == 1) {
                 for(volatile int i=0; i<1000000; i++); 
@@ -360,60 +342,108 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("Files - 5 GB Drive", wx + 10, wy + 10, 0xFFFFFF);
             gfx::fill_rect(wx + ww - 30, wy + 5, 20, 20, 0xE74C3C);
             draw_string("X", wx + ww - 25, wy + 10, 0xFFFFFF);
-
             draw_string("Total Space: 5.0 GB", wx + 30, wy + 60, 0x000000);
             draw_string("Used Space:  0.1 GB", wx + 30, wy + 90, 0x000000);
             draw_string("Free Space:  4.9 GB", wx + 30, wy + 120, 0x000000);
-            
             gfx::fill_rect(wx + 30, wy + 160, 440, 20, 0xEEEEEE);
             gfx::fill_rect(wx + 30, wy + 160, 10, 20, 0x4CAF50);
-
-            draw_string("Documents", wx + 30, wy + 220, 0x000000);
-            draw_string("Pictures", wx + 30, wy + 250, 0x000000);
-
-            if (click) {
-                if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) { state = 1; }
-            }
+            if (click && mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) { state = 1; }
         } else if (state == 4) {
             gfx::fill_screen(0x1A1A2E);
-            int wx = 200, wy = 150, ww = 400, wh = 300;
+            int wx = 200, wy = 120, ww = 400, wh = 360;
             gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
             gfx::fill_rect(wx, wy, ww, 30, 0x333333);
             draw_string("My Device Settings", wx + 10, wy + 10, 0xFFFFFF);
-            
             gfx::fill_rect(wx + ww - 30, wy + 5, 20, 20, 0xE74C3C);
             draw_string("X", wx + ww - 25, wy + 10, 0xFFFFFF);
 
-            gfx::fill_rect(wx + 20, wy + 60, 360, 40, use_touch ? 0x4CAF50 : 0xEEEEEE);
-            draw_string("Touchscreen", wx + 30, wy + 75, use_touch ? 0xFFFFFF : 0x000000);
-            draw_string(use_touch ? "ON" : "OFF", wx + 310, wy + 75, use_touch ? 0xFFFFFF : 0x000000);
+            gfx::fill_rect(wx + 20, wy + 50, 360, 40, use_touch ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Touchscreen", wx + 30, wy + 65, use_touch ? 0xFFFFFF : 0x000000);
+            draw_string(use_touch ? "ON" : "OFF", wx + 310, wy + 65, use_touch ? 0xFFFFFF : 0x000000);
 
-            gfx::fill_rect(wx + 20, wy + 120, 360, 40, use_mouse ? 0x4CAF50 : 0xEEEEEE);
-            draw_string("Mouse", wx + 30, wy + 135, use_mouse ? 0xFFFFFF : 0x000000);
-            draw_string(use_mouse ? "ON" : "OFF", wx + 310, wy + 135, use_mouse ? 0xFFFFFF : 0x000000);
+            gfx::fill_rect(wx + 20, wy + 100, 360, 40, use_mouse ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Mouse", wx + 30, wy + 115, use_mouse ? 0xFFFFFF : 0x000000);
+            draw_string(use_mouse ? "ON" : "OFF", wx + 310, wy + 115, use_mouse ? 0xFFFFFF : 0x000000);
 
-            gfx::fill_rect(wx + 20, wy + 180, 360, 40, use_kb_mouse ? 0x4CAF50 : 0xEEEEEE);
-            draw_string("Keyboard Mouse", wx + 30, wy + 195, use_kb_mouse ? 0xFFFFFF : 0x000000);
-            draw_string(use_kb_mouse ? "ON" : "OFF", wx + 310, wy + 195, use_kb_mouse ? 0xFFFFFF : 0x000000);
+            gfx::fill_rect(wx + 20, wy + 150, 360, 40, use_kb_mouse ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Keyboard Mouse", wx + 30, wy + 165, use_kb_mouse ? 0xFFFFFF : 0x000000);
+            draw_string(use_kb_mouse ? "ON" : "OFF", wx + 310, wy + 165, use_kb_mouse ? 0xFFFFFF : 0x000000);
+
+            gfx::fill_rect(wx + 20, wy + 200, 360, 40, use_hayricon ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("HayrICons (Icon Swap)", wx + 30, wy + 215, use_hayricon ? 0xFFFFFF : 0x000000);
+            draw_string(use_hayricon ? "ON" : "OFF", wx + 310, wy + 215, use_hayricon ? 0xFFFFFF : 0x000000);
+
+            draw_string("Note: Boot changes apply", wx + 20, wy + 260, 0x888888);
+            draw_string("on next restart.", wx + 20, wy + 275, 0x888888);
 
             if (click) {
                 if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) { state = 1; }
-                
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 60 && mouse_y <= wy + 100) { use_touch = !use_touch; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 120 && mouse_y <= wy + 160) { use_mouse = !use_mouse; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 180 && mouse_y <= wy + 220) { use_kb_mouse = !use_kb_mouse; }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 50 && mouse_y <= wy + 90) { use_touch = !use_touch; }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 100 && mouse_y <= wy + 140) { use_mouse = !use_mouse; }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 150 && mouse_y <= wy + 190) { use_kb_mouse = !use_kb_mouse; }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 200 && mouse_y <= wy + 240) { use_hayricon = !use_hayricon; }
             }
+        } else if (state == 5) {
+            // КАЛЬКУЛЯТОР
+            gfx::fill_screen(0x1A1A2E);
+            int wx = 250, wy = 100, ww = 300, wh = 400;
+            gfx::fill_rect(wx, wy, ww, wh, 0x333333);
+            
+            gfx::fill_rect(wx, wy, 60, 30, 0xE74C3C);
+            draw_string("< Back", wx + 5, wy + 10, 0xFFFFFF);
+
+            gfx::fill_rect(wx + 10, wy + 40, ww - 20, 60, 0xCCCCCC);
+            draw_int(calc_display, wx + 20, wy + 60, 0x000000);
+
+            const char* labels[16] = {"7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "C", "0", "=", "+"};
+            int bw = 60, bh = 50, gap = 10;
+            int startX = wx + 10, startY = wy + 120;
+
+            for (int row = 0; row < 4; row++) {
+                for (int col = 0; col < 4; col++) {
+                    int bx = startX + col * (bw + gap);
+                    int by = startY + row * (bh + gap);
+                    
+                    bool is_hover = (mouse_x >= bx && mouse_x <= bx + bw && mouse_y >= by && mouse_y <= by + bh);
+                    gfx::fill_rect(bx, by, bw, bh, is_hover ? 0xAAAAAA : 0xEEEEEE);
+                    draw_string(labels[row*4 + col], bx + 20, by + 20, 0x000000);
+
+                    if (click && is_hover) {
+                        int btn_idx = row * 4 + col;
+                        if (btn_idx == 12) { calc_display = 0; calc_new_num = true; }
+                        else if (btn_idx == 14) {
+                            if (calc_op == 1) calc_display = calc_stored + calc_display;
+                            if (calc_op == 2) calc_display = calc_stored - calc_display;
+                            if (calc_op == 3) calc_display = calc_stored * calc_display;
+                            if (calc_op == 4) { if (calc_display != 0) calc_display = calc_stored / calc_display; }
+                            calc_op = 0; calc_new_num = true;
+                        }
+                        else if (btn_idx == 3 || btn_idx == 7 || btn_idx == 11 || btn_idx == 15) {
+                            calc_stored = calc_display;
+                            calc_op = (btn_idx == 3) ? 4 : (btn_idx == 7) ? 3 : (btn_idx == 11) ? 2 : 1;
+                            calc_new_num = true;
+                        }
+                        else {
+                            int num = btn_idx == 0 ? 7 : btn_idx == 1 ? 8 : btn_idx == 2 ? 9 :
+                                      btn_idx == 4 ? 4 : btn_idx == 5 ? 5 : btn_idx == 6 ? 6 :
+                                      btn_idx == 8 ? 1 : btn_idx == 9 ? 2 : btn_idx == 10 ? 3 :
+                                      btn_idx == 13 ? 0 : 0;
+                            if (calc_new_num) { calc_display = num; calc_new_num = false; }
+                            else { if (calc_display < 99999999) calc_display = calc_display * 10 + num; }
+                        }
+                    }
+                }
+            }
+
+            if (click && mouse_x >= wx && mouse_x <= wx + 60 && mouse_y >= wy && mouse_y <= wy + 30) { state = 1; }
         }
 
         if (power_menu_open) {
             gfx::fill_rect(650, 35, 150, 130, 0x333333);
-            
             gfx::fill_rect(660, 45, 130, 30, 0x555555);
             draw_string("Settings", 680, 55, 0xFFFFFF);
-
             gfx::fill_rect(660, 85, 130, 30, 0xE74C3C);
             draw_string("Restart", 690, 95, 0xFFFFFF);
-            
             gfx::fill_rect(660, 125, 130, 30, 0xE74C3C);
             draw_string("Shutdown", 690, 135, 0xFFFFFF);
 
