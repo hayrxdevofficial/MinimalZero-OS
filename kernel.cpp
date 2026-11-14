@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Calculator, HayrICons & Dynamic Boot (Fixed)
+//  iMimi OS — Calculator, HayrICons & True Saving (CMOS)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -43,14 +43,77 @@ bool power_menu_open = false;
 u8 mouse_cycle = 0;
 u8 mouse_byte[3];
 
-// Переменные калькулятора (теперь int вместо long long)
 int calc_display = 0;
 int calc_stored = 0;
 int calc_op = 0; 
 bool calc_new_num = true;
 
-void reboot() { outb(0x64, 0xFE); }
-void shutdown() { outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
+// --- CMOS СОХРАНЕНИЕ ---
+u8 cmos_read(u8 reg) {
+    outb(0x70, reg);
+    return inb(0x71);
+}
+
+void cmos_write(u8 reg, u8 val) {
+    outb(0x70, (reg | 0x80)); // Отключаем NMI
+    outb(0x71, val);
+    outb(0x70, 0); // Возвращаем как было
+}
+
+void save_settings() {
+    u8 flags = 0;
+    if (use_touch) flags |= 1;
+    if (use_mouse) flags |= 2;
+    if (use_kb_mouse) flags |= 4;
+    if (use_hayricon) flags |= 8;
+    cmos_write(0x40, flags);
+
+    cmos_write(0x41, (u8)(coins >> 24));
+    cmos_write(0x42, (u8)(coins >> 16));
+    cmos_write(0x43, (u8)(coins >> 8));
+    cmos_write(0x44, (u8)(coins));
+
+    u8 g_flags = 0;
+    if (unlocked_teen) g_flags |= 1;
+    if (unlocked_cool) g_flags |= 2;
+    if (has_auto_click) g_flags |= 4;
+    cmos_write(0x45, g_flags);
+    cmos_write(0x46, (u8)auto_speed_level);
+    cmos_write(0x47, (u8)click_power_level);
+}
+
+void load_settings() {
+    u8 flags = cmos_read(0x40);
+    if (flags == 0xFF) { // Если память пустая (первый запуск)
+        use_touch = false;
+        use_mouse = true;
+        use_kb_mouse = true;
+        use_hayricon = false;
+        coins = 0;
+        return;
+    }
+    use_touch = (flags & 1) != 0;
+    use_mouse = (flags & 2) != 0;
+    use_kb_mouse = (flags & 4) != 0;
+    use_hayricon = (flags & 8) != 0;
+
+    coins = (cmos_read(0x41) << 24) | (cmos_read(0x42) << 16) | (cmos_read(0x43) << 8) | cmos_read(0x44);
+    
+    u8 g_flags = cmos_read(0x45);
+    unlocked_teen = (g_flags & 1) != 0;
+    unlocked_cool = (g_flags & 2) != 0;
+    has_auto_click = (g_flags & 4) != 0;
+    auto_speed_level = cmos_read(0x46);
+    click_power_level = cmos_read(0x47);
+    
+    // Защита от мусора
+    if (auto_speed_level > 10) auto_speed_level = 0;
+    if (click_power_level > 1) click_power_level = 0;
+    if (coins < 0) coins = 0;
+}
+
+void reboot() { save_settings(); outb(0x64, 0xFE); }
+void shutdown() { save_settings(); outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
 void poll_inputs() {
     for (int i = 0; i < 16; i++) {
@@ -103,15 +166,27 @@ namespace gfx {
         return (r << 16) | (g << 8) | b;
     }
 
+    // ИСПРАВЛЕННЫЙ ДЕКОДЕР (Картинки будут идеальными)
     void draw_image_scaled(int ox, int oy, int draw_w, int draw_h, const u16* rle, u32 rle_size, int img_w, int img_h) {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < rle_size) {
             u16 header = rle[idx++];
-            u32 len = (header & 0x8000) ? (header & 0x7FFF) : header;
-            for (u32 i = 0; i < len; i++) {
+            if (header & 0x8000) {
+                // Если это серия, читаем цвет ОДИН раз
+                u32 len = header & 0x7FFF;
                 u32 col = rgb565_to_888(rle[idx++]);
-                put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                if (++x >= img_w) { x = 0; y++; }
+                for (u32 i = 0; i < len; i++) {
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
+            } else {
+                // Если одиночные пиксели, читаем цвет каждого
+                u32 len = header;
+                for (u32 i = 0; i < len; i++) {
+                    u32 col = rgb565_to_888(rle[idx++]);
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
             }
         }
     }
@@ -180,7 +255,6 @@ void draw_char(char c, int x, int y, u32 color) {
 void draw_string(const char* s, int x, int y, u32 color) {
     while (*s) { draw_char(*s++, x, y, color); x += 8; }
 }
-// Изменили long long на int для draw_int
 void draw_int(int num, int x, int y, u32 color) {
     char buf[24]; int i = 0;
     if (num == 0) { draw_char('0', x, y, color); return; }
@@ -213,6 +287,7 @@ void draw_cursor(int x, int y) {
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
     (void)magic; 
     gfx::init(mb); 
+    load_settings(); // Загружаем сохранения при старте!
     
     int state = 0; 
     int current_mimi = 0; 
@@ -311,12 +386,13 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
 
             if (click) {
                 if (mouse_x >= 10 && mouse_x <= 70 && mouse_y >= 10 && mouse_y <= 40) { state = 1; }
-                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_teen) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_teen = true; current_mimi = 1; } }
-                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; } }
+                // При покупках сохраняем!
+                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_teen) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_teen = true; current_mimi = 1; save_settings(); } }
+                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 460 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; save_settings(); } }
                 if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 460 && mouse_y <= 500) { current_mimi = 0; }
-                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; } }
-                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 560) { if (coins >= speed_cost) { coins -= speed_cost; auto_speed_level++; } }
-                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 560) { if (click_power_level == 0 && coins >= 30) { coins -= 30; click_power_level = 1; } }
+                if (mouse_x >= 50 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 560) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; save_settings(); } }
+                if (mouse_x >= 250 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 560) { if (coins >= speed_cost) { coins -= speed_cost; auto_speed_level++; save_settings(); } }
+                if (mouse_x >= 450 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 560) { if (click_power_level == 0 && coins >= 30) { coins -= 30; click_power_level = 1; save_settings(); } }
             }
 
             int ox = 0, oy = 0, draw_w = 0, draw_h = 0;
@@ -373,15 +449,13 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("HayrICons (Icon Swap)", wx + 30, wy + 215, use_hayricon ? 0xFFFFFF : 0x000000);
             draw_string(use_hayricon ? "ON" : "OFF", wx + 310, wy + 215, use_hayricon ? 0xFFFFFF : 0x000000);
 
-            draw_string("Note: Boot changes apply", wx + 20, wy + 260, 0x888888);
-            draw_string("on next restart.", wx + 20, wy + 275, 0x888888);
-
             if (click) {
                 if (mouse_x >= wx + ww - 30 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 5 && mouse_y <= wy + 25) { state = 1; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 50 && mouse_y <= wy + 90) { use_touch = !use_touch; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 100 && mouse_y <= wy + 140) { use_mouse = !use_mouse; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 150 && mouse_y <= wy + 190) { use_kb_mouse = !use_kb_mouse; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 200 && mouse_y <= wy + 240) { use_hayricon = !use_hayricon; }
+                // Сохраняем при переключении настроек!
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 50 && mouse_y <= wy + 90) { use_touch = !use_touch; save_settings(); }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 100 && mouse_y <= wy + 140) { use_mouse = !use_mouse; save_settings(); }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 150 && mouse_y <= wy + 190) { use_kb_mouse = !use_kb_mouse; save_settings(); }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 200 && mouse_y <= wy + 240) { use_hayricon = !use_hayricon; save_settings(); }
             }
         } else if (state == 5) {
             gfx::fill_screen(0x1A1A2E);
