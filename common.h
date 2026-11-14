@@ -15,16 +15,19 @@ static inline u16  inw(u16 p)         { u16 v; asm volatile("inw %1,%0" : "=a"(v
 
 extern "C" {
 void* memset(void* d, int c, unsigned int n) {
-    u8* p = (u8*)d; while (n--) *p++ = (u8)c; return d;
+    u8* p = (u8*)d; 
+    while (n--) { *p++ = (u8)c; } 
+    return d;
 }
 void* memcpy(void* d, const void* s, unsigned int n) {
     u8* a = (u8*)d; const u8* b = (const u8*)s;
-    while (n--) *a++ = *b++; return d;
+    while (n--) { *a++ = *b++; } 
+    return d;
 }
 void* memmove(void* d, const void* s, unsigned int n) {
     u8* a = (u8*)d; const u8* b = (const u8*)s;
-    if (a < b) { while (n--) *a++ = *b++; }
-    else { a += n; b += n; while (n--) *--a = *--b; }
+    if (a < b) { while (n--) { *a++ = *b++; } }
+    else { a += n; b += n; while (n--) { *--a = *--b; } }
     return d;
 }
 int memcmp(const void* a, const void* b, unsigned int n) {
@@ -52,7 +55,9 @@ static inline bool seq(const char* a, const char* b) {
     while (*a && *a == *b) { a++; b++; } return *a == *b;
 }
 static inline int sappend(char* d, int pos, const char* s, int max) {
-    while (*s && pos < max - 1) d[pos++] = *s++; d[pos] = 0; return pos;
+    while (*s && pos < max - 1) { d[pos++] = *s++; }
+    d[pos] = 0; 
+    return pos;
 }
 static inline int itoa_(int v, char* buf) {
     char t[16]; int n = 0, i = 0; bool neg = v < 0;

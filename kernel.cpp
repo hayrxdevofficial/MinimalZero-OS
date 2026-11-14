@@ -69,7 +69,7 @@ void fs_init() {
 }
 
 // ============================================================
-//  Время через TSC (приблизительно)
+//  Время через TSC
 // ============================================================
 static u64 tsc_base = 0;
 void time_init() {
@@ -81,12 +81,11 @@ u32 time_ms() {
     u32 lo, hi;
     asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
     u64 now = ((u64)hi << 32) | lo;
-    // Приблизительно: 3 GHz → 3,000,000 тиков/мс
     return (u32)((now - tsc_base) / 3000000ULL);
 }
 
 // ============================================================
-//  Звук (PC Speaker)
+//  Звук
 // ============================================================
 void beep(u32 freq, u32 ms) {
     if (g_volume == 0 || freq < 20) return;
@@ -99,7 +98,6 @@ void beep(u32 freq, u32 ms) {
     outb(0x61, inb(0x61) & 0xFC);
 }
 
-// RTC-заглушка (для настроек)
 void rtc_get(int& h, int& m, int& s) { h = 12; m = 0; s = 0; }
 
 // ============================================================
@@ -117,13 +115,8 @@ static int drag_win = -1, drag_dx = 0, drag_dy = 0;
 
 static void init_wins() {
     static const int sizes[NAPPS][2] = {
-        {600, 400},  // CLI
-        {700, 480},  // Files
-        {800, 550},  // Browser
-        {500, 350},  // Installer
-        {700, 500},  // Clicker
-        {340, 460},  // Calc
-        {500, 480}   // Settings
+        {600, 400}, {700, 480}, {800, 550}, {500, 350},
+        {700, 500}, {340, 460}, {500, 480}
     };
     for (int i = 0; i < NAPPS; i++) {
         wins[i].open = false; wins[i].min = false;
@@ -160,10 +153,9 @@ static int win_at(int x, int y) {
 }
 
 // ============================================================
-//  Иконки для рабочего стола
+//  Иконки
 // ============================================================
 static void draw_app_icon(int a, int x, int y) {
-    // Все иконки 56x56
     if (a == APP_CLI) {
         gfx::round(x + 4, y + 4, 48, 48, 6, 0x111111);
         text::draw(">_", x + 12, y + 18, 0x00FF00, 2);
@@ -193,11 +185,6 @@ static void draw_app_icon(int a, int x, int y) {
     } else if (a == APP_SET) {
         gfx::circle(x + 28, y + 28, 22, 0xAEB6C4);
         gfx::circle(x + 28, y + 28, 12, 0x4B5563);
-        // зубцы
-        for (int i = 0; i < 8; i++) {
-            int ang = i * 45;
-            // упрощённо — квадратики по кругу
-        }
     }
 }
 
@@ -205,12 +192,10 @@ static void draw_app_icon(int a, int x, int y) {
 //  Render
 // ============================================================
 static void render() {
-    // Обои
     gfx::grad_v(0, 0, g_scr_w, g_scr_h, 0x1A1A2E, 0x16213E);
     gfx::circle_a(g_scr_w * 3 / 4, g_scr_h / 3, g_scr_h / 3, 0x5B7CFA, 40);
     gfx::circle_a(g_scr_w / 3, g_scr_h * 3 / 4, g_scr_h / 4, 0xFF6FB5, 34);
 
-    // Иконки на столе — вертикально слева
     static const int desk_apps[7] = {
         APP_CLI, APP_FILES, APP_BROWSER, APP_INSTALLER,
         APP_CLICKER, APP_CALC, APP_SET
@@ -218,45 +203,37 @@ static void render() {
     for (int i = 0; i < 7; i++) {
         int ix = 20, iy = 20 + i * 80;
         if (hit_rect(ix, iy, 100, 80, g_mx, g_my))
-            gfx::round(ix, iy, 100, 80, 10, 0xFFFFFF, 0, 70);
+            gfx::round_a(ix, iy, 100, 80, 10, 0xFFFFFF, 70); // ИСПРАВЛЕНО
         draw_app_icon(desk_apps[i], ix + 22, iy + 4);
         const char* t = app_title[desk_apps[i]];
         int tw = text::width(t, 1);
         text::draw(t, ix + 50 - tw / 2, iy + 62, 0xFFFFFF, 1);
     }
 
-    // Окна
     for (int i = 0; i < NAPPS; i++) {
         int a = zord[i];
         if (wins[a].open && !wins[a].min) {
             Win& w = wins[a];
             bool active = (top_win() == a);
 
-            // Тень
             gfx::round_a(w.x + 4, w.y + 6, w.w, w.h, 12, 0x000000, 80);
 
-            // Заголовок
             u32 title_col = active ? 0x2D4A9A : 0x353A50;
             gfx::round(w.x, w.y, w.w, 32, 10, title_col);
             gfx::rect(w.x, w.y + 20, w.w, 12, title_col);
 
-            // Название
             text::draw(app_title[a], w.x + 16, w.y + 12, 0xFFFFFF, 1);
 
-            // Кнопки [- x]
-            // Кнопка закрыть
             int cx_btn = w.x + w.w - 28;
             if (hit_rect(cx_btn, w.y + 8, 20, 16, g_mx, g_my))
                 gfx::round(cx_btn, w.y + 8, 20, 16, 4, 0xEF4444);
             text::draw_c("x", cx_btn, w.y + 8, 20, 16, 0xFFFFFF, 1);
 
-            // Кнопка свернуть
             int mx_btn = w.x + w.w - 52;
             if (hit_rect(mx_btn, w.y + 8, 20, 16, g_mx, g_my))
                 gfx::round(mx_btn, w.y + 8, 20, 16, 4, 0x6B7BB5);
             text::draw_c("-", mx_btn, w.y + 8, 20, 16, 0xFFFFFF, 1);
 
-            // Контент
             gfx::rect(w.x, w.y + 32, w.w, w.h - 32, 0xFFFFFF);
 
             switch (a) {
@@ -271,15 +248,12 @@ static void render() {
         }
     }
 
-    // Панель задач
     gfx::rect_a(0, g_scr_h - 44, g_scr_w, 44, 0x10142A, 215);
     gfx::rect(0, g_scr_h - 44, g_scr_w, 1, 0x4C5C9A);
 
-    // Кнопка "Пуск"
     gfx::round(6, g_scr_h - 38, 96, 32, 8, 0x3B82F6);
     text::draw_c("iMimi", 6, g_scr_h - 38, 96, 32, 0xFFFFFF, 1);
 
-    // Открытые окна на панели
     int slot = 0;
     for (int a = 0; a < NAPPS; a++) {
         if (!wins[a].open) continue;
@@ -290,11 +264,9 @@ static void render() {
         slot++;
     }
 
-    // Время
     char clock[8] = "12:00";
     text::draw(clock, g_scr_w - 70, g_scr_h - 26, 0xFFFFFF, 2);
 
-    // Курсор
     gfx::rect(g_mx, g_my, 3, 3, 0xFFFFFF);
     gfx::rect(g_mx - 1, g_my - 1, 5, 5, 0x000000);
 }
@@ -303,7 +275,6 @@ static void render() {
 //  Ввод
 // ============================================================
 void on_key(int k) {
-    // F1 — закрыть активное
     if (k == K_F1) {
         int t = top_win();
         if (t >= 0) { wins[t].open = false; return; }
@@ -312,12 +283,8 @@ void on_key(int k) {
     int t = top_win();
     if (t < 0) return;
 
-    if (k == 27) {  // Esc
-        wins[t].open = false;
-        return;
-    }
+    if (k == 27) { wins[t].open = false; return; }
 
-    // Передаём в активное приложение
     switch (t) {
         case APP_CLI:       cli_key(k); break;
         case APP_BROWSER:   browser_key(k); break;
@@ -326,7 +293,6 @@ void on_key(int k) {
         case APP_FILES:     files_key(k); break;
     }
 
-    // Управление курсором с клавиатуры
     if (g_kb_mouse) {
         int step = 8 * g_mspeed;
         if (k == K_LEFT || k == 'a') g_mx -= step;
@@ -337,25 +303,15 @@ void on_key(int k) {
         if (g_mx >= g_scr_w) g_mx = g_scr_w - 1;
         if (g_my < 0) g_my = 0;
         if (g_my >= g_scr_h) g_my = g_scr_h - 1;
-        if (k == ' ') {
-            g_press = true;
-            g_px = g_mx;
-            g_py = g_my;
-        }
+        if (k == ' ') { g_press = true; g_px = g_mx; g_py = g_my; }
     }
 }
 
 static void handle_press(int px, int py) {
-    // Проверка — клик по панели задач
     if (py >= g_scr_h - 44) {
-        // Кнопка "Пуск" — открывает меню (упрощённо — открывает Files)
         if (px >= 6 && px <= 102) {
-            wins[APP_FILES].open = true;
-            wins[APP_FILES].min = false;
-            front(APP_FILES);
-            return;
+            wins[APP_FILES].open = true; wins[APP_FILES].min = false; front(APP_FILES); return;
         }
-        // Иконки открытых окон
         int slot = 0;
         for (int a = 0; a < NAPPS; a++) {
             if (!wins[a].open) continue;
@@ -371,30 +327,14 @@ static void handle_press(int px, int py) {
         return;
     }
 
-    // Клик по окну
     int a = win_at(px, py);
     if (a >= 0) {
-        front(a);
-        Win& w = wins[a];
-
-        // Заголовок — кнопки
+        front(a); Win& w = wins[a];
         if (py < w.y + 32) {
-            if (px >= w.x + w.w - 28 && px <= w.x + w.w - 8) {
-                wins[a].open = false;
-                return;
-            }
-            if (px >= w.x + w.w - 52 && px <= w.x + w.w - 32) {
-                wins[a].min = true;
-                return;
-            }
-            // Перетаскивание
-            drag_win = a;
-            drag_dx = px - w.x;
-            drag_dy = py - w.y;
-            return;
+            if (px >= w.x + w.w - 28 && px <= w.x + w.w - 8) { wins[a].open = false; return; }
+            if (px >= w.x + w.w - 52 && px <= w.x + w.w - 32) { wins[a].min = true; return; }
+            drag_win = a; drag_dx = px - w.x; drag_dy = py - w.y; return;
         }
-
-        // Контент
         switch (a) {
             case APP_CLI:       cli_click(px, py, w.x, w.y + 32, w.w, w.h - 32); break;
             case APP_FILES:     files_click(px, py, w.x, w.y + 32, w.w, w.h - 32); break;
@@ -407,7 +347,6 @@ static void handle_press(int px, int py) {
         return;
     }
 
-    // Клик по иконке на столе
     static const int desk_apps[7] = {
         APP_CLI, APP_FILES, APP_BROWSER, APP_INSTALLER,
         APP_CLICKER, APP_CALC, APP_SET
@@ -415,17 +354,12 @@ static void handle_press(int px, int py) {
     for (int i = 0; i < 7; i++) {
         int ix = 20, iy = 20 + i * 80;
         if (px >= ix && px <= ix + 100 && py >= iy && py <= iy + 80) {
-            wins[desk_apps[i]].open = true;
-            wins[desk_apps[i]].min = false;
-            front(desk_apps[i]);
-            return;
+            wins[desk_apps[i]].open = true; wins[desk_apps[i]].min = false; front(desk_apps[i]); return;
         }
     }
 }
 
-static void handle_release() {
-    drag_win = -1;
-}
+static void handle_release() { drag_win = -1; }
 
 // ============================================================
 //  kmain
@@ -445,7 +379,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     clicker_init();
     calc_init();
 
-    // Splash
     gfx::clear(0x121212);
     text::draw_c("iMimi OS", 0, g_scr_h / 2 - 40, g_scr_w, 40, 0xFFFFFF, 3);
     text::draw_c("Preparing...", 0, g_scr_h / 2 + 10, g_scr_w, 20, 0x9CA3AF, 1);
@@ -461,7 +394,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     while (1) {
         bool need = false;
 
-        // Опрос клавиатуры и мыши
         while (inb(0x64) & 1) {
             u8 b = inb(0x60);
             if (b & 0x20) mouse::feed(b);
@@ -469,35 +401,26 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             need = true;
         }
 
-        // Сеть (входящие файлы)
         int b = net_poll_byte();
         if (b >= 0) need = true;
 
-        // Мышь
         if (g_press) { g_press = false; handle_press(g_px, g_py); need = true; }
         if (g_release) { g_release = false; handle_release(); need = true; }
 
-        // Перетаскивание
         if (drag_win >= 0) {
             wins[drag_win].x = g_mx - drag_dx;
             wins[drag_win].y = g_my - drag_dy;
             if (wins[drag_win].x < 0) wins[drag_win].x = 0;
             if (wins[drag_win].y < 0) wins[drag_win].y = 0;
-            if (wins[drag_win].x + wins[drag_win].w > g_scr_w)
-                wins[drag_win].x = g_scr_w - wins[drag_win].w;
-            if (wins[drag_win].y + wins[drag_win].h > g_scr_h - 44)
-                wins[drag_win].y = g_scr_h - 44 - wins[drag_win].h;
+            if (wins[drag_win].x + wins[drag_win].w > g_scr_w) wins[drag_win].x = g_scr_w - wins[drag_win].w;
+            if (wins[drag_win].y + wins[drag_win].h > g_scr_h - 44) wins[drag_win].y = g_scr_h - 44 - wins[drag_win].h;
             need = true;
         }
 
-        // Тик анимации Clicker (каждые 16 мс)
         u32 now = time_ms();
         if (now - last_tick >= 16) {
             last_tick = now;
-            if (wins[APP_CLICKER].open) {
-                clicker_tick();
-                need = true;
-            }
+            if (wins[APP_CLICKER].open) { clicker_tick(); need = true; }
         }
 
         if (need) { render(); gfx::swap(); }
