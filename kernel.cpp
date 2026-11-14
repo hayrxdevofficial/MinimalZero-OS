@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Mobile Grid, Hardware Buttons & Sound
+//  iMimi OS — Mobile Portrait Edition (480x800)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -22,11 +22,8 @@ struct multiboot_info {
 
 #include "images.h"
 
-// --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-int mouse_x = 400, mouse_y = 300;
+int mouse_x = 240, mouse_y = 400;
 bool mouse_left_clicked = false;
-bool mouse_was_down = false; 
-
 bool use_hayricon = false;
 int coins = 0;
 bool unlocked_teen = false;
@@ -35,9 +32,8 @@ bool has_auto_click = false;
 int auto_speed_level = 0;
 int click_power_level = 0;
 int auto_click_timer = 0;
-
 bool power_menu_open = false;
-int volume = 50; // Громкость (0-100)
+int volume = 50; 
 u8 mouse_cycle = 0;
 u8 mouse_byte[3];
 
@@ -46,77 +42,46 @@ int calc_stored = 0;
 int calc_op = 0; 
 bool calc_new_num = true;
 
-// --- ЗВУК (PC SPEAKER) ---
+// --- ЗВУК ---
 void play_sound(u32 freq) {
-    if (volume == 0) return; // Если выключено, молчим
+    if (volume == 0) return;
     u32 div = 1193180 / freq;
-    outb(0x43, 0xB6);
-    outb(0x42, (u8)(div));
-    outb(0x42, (u8)(div >> 8));
-    u8 tmp = inb(0x61);
-    if (tmp != (tmp | 3)) outb(0x61, tmp | 3);
+    outb(0x43, 0xB6); outb(0x42, (u8)(div)); outb(0x42, (u8)(div >> 8));
+    u8 tmp = inb(0x61); if (tmp != (tmp | 3)) outb(0x61, tmp | 3);
 }
+void stop_sound() { outb(0x61, inb(0x61) & 0xFC); }
 
-void stop_sound() {
-    u8 tmp = inb(0x61) & 0xFC;
-    outb(0x61, tmp);
-}
-
-// --- СОХРАНЕНИЕ (CMOS) ---
+// --- СОХРАНЕНИЕ ---
 u8 cmos_read(u8 reg) { outb(0x70, reg); return inb(0x71); }
 void cmos_write(u8 reg, u8 val) { outb(0x70, (reg | 0x80)); outb(0x71, val); outb(0x70, 0); }
-
 void save_settings() {
-    u8 flags = 0;
-    if (use_hayricon) flags |= 8;
-    cmos_write(0x40, flags);
-    cmos_write(0x41, (u8)(coins >> 24));
-    cmos_write(0x42, (u8)(coins >> 16));
-    cmos_write(0x43, (u8)(coins >> 8));
-    cmos_write(0x44, (u8)(coins));
-    u8 g_flags = 0;
-    if (unlocked_teen) g_flags |= 1;
-    if (unlocked_cool) g_flags |= 2;
-    if (has_auto_click) g_flags |= 4;
-    cmos_write(0x45, g_flags);
-    cmos_write(0x46, (u8)auto_speed_level);
-    cmos_write(0x47, (u8)click_power_level);
-    cmos_write(0x48, (u8)volume); // Сохраняем громкость
+    cmos_write(0x40, use_hayricon ? 8 : 0);
+    cmos_write(0x41, (u8)(coins >> 24)); cmos_write(0x42, (u8)(coins >> 16)); cmos_write(0x43, (u8)(coins >> 8)); cmos_write(0x44, (u8)(coins));
+    cmos_write(0x45, (unlocked_teen?1:0) | (unlocked_cool?2:0) | (has_auto_click?4:0));
+    cmos_write(0x46, (u8)auto_speed_level); cmos_write(0x47, (u8)click_power_level); cmos_write(0x48, (u8)volume);
 }
-
 void load_settings() {
-    u8 flags = cmos_read(0x40);
-    if (flags == 0xFF) return; 
+    u8 flags = cmos_read(0x40); if (flags == 0xFF) return; 
     use_hayricon = (flags & 8) != 0;
     coins = (cmos_read(0x41) << 24) | (cmos_read(0x42) << 16) | (cmos_read(0x43) << 8) | cmos_read(0x44);
-    u8 g_flags = cmos_read(0x45);
-    unlocked_teen = (g_flags & 1) != 0;
-    unlocked_cool = (g_flags & 2) != 0;
-    has_auto_click = (g_flags & 4) != 0;
-    auto_speed_level = cmos_read(0x46);
-    click_power_level = cmos_read(0x47);
-    volume = cmos_read(0x48);
+    u8 g = cmos_read(0x45);
+    unlocked_teen = (g & 1); unlocked_cool = (g & 2); has_auto_click = (g & 4);
+    auto_speed_level = cmos_read(0x46); click_power_level = cmos_read(0x47); volume = cmos_read(0x48);
     if (volume > 100) volume = 50;
     if (coins < 0) coins = 0;
 }
-
 void reboot() { save_settings(); outb(0x64, 0xFE); }
 void shutdown() { save_settings(); outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
-// --- ОПРОС ВВОДА ---
 void poll_inputs() {
     for (int i = 0; i < 16; i++) {
         if (!(inb(0x64) & 1)) break;
-        u8 status = inb(0x64);
-        u8 data = inb(0x60);
-        
+        u8 status = inb(0x64); u8 data = inb(0x60);
         if (status & 0x20) {
             mouse_byte[mouse_cycle++] = data;
             if (mouse_cycle == 3) {
                 mouse_cycle = 0;
-                bool is_clicking = (mouse_byte[0] & 0x01);
-                if (is_clicking && !mouse_was_down) mouse_left_clicked = true;
-                mouse_was_down = is_clicking;
+                if (mouse_byte[0] & 0x01) mouse_left_clicked = true;
                 if (!(mouse_byte[0] & 0x08)) {
                     int dx = (mouse_byte[0] & 0x10) ? (mouse_byte[1] - 256) : mouse_byte[1];
                     int dy = (mouse_byte[0] & 0x20) ? (mouse_byte[2] - 256) : mouse_byte[2];
@@ -124,23 +89,9 @@ void poll_inputs() {
                 }
             }
         } else {
-            // ОБРАБОТКА НАШИХ КНОПОК (F1, F2, F3)
-            if (data == 0x3B) { // POWER
-                power_menu_open = !power_menu_open;
-                play_sound(800); for(volatile int i=0; i<2000000; i++); stop_sound();
-            }
-            if (data == 0x3C) { // VOL+
-                if (volume < 100) volume += 10;
-                save_settings();
-                play_sound(600); for(volatile int i=0; i<2000000; i++); stop_sound();
-            }
-            if (data == 0x3D) { // VOL-
-                if (volume > 0) volume -= 10;
-                save_settings();
-                play_sound(400); for(volatile int i=0; i<2000000; i++); stop_sound();
-            }
-
-            // Старая клавиатура (для ПК)
+            if (data == 0x3B) power_menu_open = !power_menu_open;
+            if (data == 0x3C) { if (volume < 100) volume += 10; save_settings(); }
+            if (data == 0x3D) { if (volume > 0) volume -= 10; save_settings(); }
             if (data == 0x48 || data == 0x11) mouse_y -= 20;
             if (data == 0x50 || data == 0x1F) mouse_y += 20;
             if (data == 0x4B || data == 0x1E) mouse_x -= 20;
@@ -150,12 +101,12 @@ void poll_inputs() {
     }
 }
 
-// --- ГРАФИКА (Без изменений) ---
+// --- ГРАФИКА ---
 namespace gfx {
     static u8* fb = nullptr; 
-    static u32 W = 800, H = 600, pitch = 0; 
+    static u32 W = 480, H = 800, pitch = 0; 
     static u8 bpp = 32;
-    static u32 back_buffer[800 * 600]; 
+    static u32 back_buffer[800 * 800]; 
 
     void init(multiboot_info* mb) {
         if (mb->flags & (1u << 12)) {
@@ -176,37 +127,32 @@ namespace gfx {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < rle_size) {
             u16 header = rle[idx++];
-            u32 len = (header & 0x8000) ? (header & 0x7FFF) : header;
-            for (u32 i = 0; i < len; i++) {
+            if (header & 0x8000) {
+                u32 len = header & 0x7FFF;
                 u32 col = rgb565_to_888(rle[idx++]);
-                put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
-                if (++x >= img_w) { x = 0; y++; }
+                for (u32 i = 0; i < len; i++) {
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
+            } else {
+                u32 len = header;
+                for (u32 i = 0; i < len; i++) {
+                    u32 col = rgb565_to_888(rle[idx++]);
+                    put_pixel(ox + (x * draw_w) / img_w, oy + (y * draw_h) / img_h, col);
+                    if (++x >= img_w) { x = 0; y++; }
+                }
             }
         }
-    }
-
-    void draw_image_centered(int target_h, const u16* rle, u32 rle_size, int img_w, int img_h, int squish_pixels) {
-        int draw_h = target_h - squish_pixels;
-        int draw_w = (img_w * draw_h) / img_h; 
-        int ox = (W - draw_w) / 2;
-        int oy = (H - draw_h) / 2 - 30;
-        draw_image_scaled(ox, oy, draw_w, draw_h, rle, rle_size, img_w, img_h);
     }
 
     void swap() {
         if (!fb) return;
         u32* dest = (u32*)fb; u32* src = back_buffer; u32 p32 = pitch / 4;
         if (p32 == W) { for (u32 i = 0; i < W * H; i++) dest[i] = src[i]; }
-        else {
-            for (u32 y = 0; y < H; y++) {
-                u32* row_dest = dest + (y * p32); u32* row_src = src + (y * W);
-                for (u32 x = 0; x < W; x++) row_dest[x] = row_src[x];
-            }
-        }
+        else { for (u32 y = 0; y < H; y++) { for (u32 x = 0; x < W; x++) dest[y*p32+x] = src[y*W+x]; } }
     }
 }
 
-// --- ШРИФТ (Сокращен для экономии места, но полностью рабочий) ---
 static const u8 font8x8[95][8] = { 
     {0,0,0,0,0,0,0,0},{0x18,0x18,0x18,0x18,0,0,0x18,0},{0x6C,0x6C,0x6C,0,0,0,0,0},{0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0},
     {0x18,0x7E,0xC0,0x7C,0x06,0xFC,0x18,0},{0,0xC6,0xCC,0x18,0x30,0x66,0xC6,0},{0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0},
@@ -260,8 +206,8 @@ void draw_int(int num, int x, int y, u32 color) {
 }
 
 void draw_cursor(int x, int y) {
-    gfx::fill_rect(x-3, y-3, 6, 6, 0xFF0000);
-    gfx::fill_rect(x-1, y-1, 2, 2, 0xFFFFFF);
+    gfx::fill_rect(x-5, y-5, 10, 10, 0xFF0000);
+    gfx::fill_rect(x-3, y-3, 6, 6, 0xFFFFFF);
 }
 
 // ============================================================
@@ -285,11 +231,11 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     for(volatile u32 i = 0; i < 600000000; i++) {
         if (i % 10000000 == 0 && progress < 400) {
             gfx::fill_screen(boot_bg); 
-            if (use_hayricon) gfx::draw_image_centered(300, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h, 0);
-            else gfx::draw_image_centered(300, img_base_rle, img_base_size, img_base_w, img_base_h, 0);
+            if (use_hayricon) gfx::draw_image_scaled(110, 200, 260, 260, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
+            else gfx::draw_image_scaled(110, 200, 260, 260, img_base_rle, img_base_size, img_base_w, img_base_h);
             
-            gfx::fill_rect(200, 500, 400, 20, bar_bg);
-            gfx::fill_rect(200, 500, progress, 20, bar_color);
+            gfx::fill_rect(40, 600, 400, 20, bar_bg);
+            gfx::fill_rect(40, 600, progress, 20, bar_color);
             gfx::swap();
             progress += 7;
         }
@@ -303,47 +249,45 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         mouse_left_clicked = false;
 
         if (mouse_x < 0) { mouse_x = 0; }
-        if (mouse_x > 799) { mouse_x = 799; }
+        if (mouse_x > 479) { mouse_x = 479; }
         if (mouse_y < 0) { mouse_y = 0; }
-        if (mouse_y > 599) { mouse_y = 599; }
+        if (mouse_y > 799) { mouse_y = 799; }
 
         if (state == 1) {
+            // РАБОЧИЙ СТОЛ (Портрет)
             gfx::fill_screen(0x1A1A2E); 
-            gfx::fill_rect(0, 0, 800, 40, 0x111122);
+            gfx::fill_rect(0, 0, 480, 40, 0x111122);
             
             draw_string("12:00", 20, 15, 0xFFFFFF); 
-            draw_string("RAM: 8 MB", 200, 15, 0x888888);
-            
-            // Индикатор громкости
-            draw_string("VOL:", 600, 15, 0x888888);
-            draw_int(volume, 640, 15, 0xFFFFFF);
+            draw_string("VOL:", 350, 15, 0x888888);
+            draw_int(volume, 400, 15, 0xFFFFFF);
 
             // СЕТКА 3 ИКОНКИ В РЯД
-            // 1. Mimi Clicker
-            if (use_hayricon) gfx::draw_image_scaled(50, 70, 120, 120, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
-            else gfx::draw_image_scaled(50, 70, 120, 120, img_base_rle, img_base_size, img_base_w, img_base_h);
-            draw_string("Clicker", 70, 200, 0xFFFFFF);
+            // 1. Clicker
+            if (use_hayricon) gfx::draw_image_scaled(30, 80, 100, 100, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
+            else gfx::draw_image_scaled(30, 80, 100, 100, img_base_rle, img_base_size, img_base_w, img_base_h);
+            draw_string("Clicker", 40, 190, 0xFFFFFF);
 
             // 2. Files
-            gfx::fill_rect(250, 70, 120, 120, 0x4CAF50);
-            draw_string("Files", 290, 120, 0xFFFFFF);
-            draw_string("Files", 290, 200, 0xFFFFFF);
+            gfx::fill_rect(190, 80, 100, 100, 0x4CAF50);
+            draw_string("Files", 210, 120, 0xFFFFFF);
+            draw_string("Files", 215, 190, 0xFFFFFF);
 
-            // 3. Calculator
-            gfx::fill_rect(450, 70, 120, 120, 0x9E9E9E);
-            draw_string("Calc", 480, 120, 0x000000);
-            draw_string("Calc", 480, 200, 0xFFFFFF);
+            // 3. Calc
+            gfx::fill_rect(350, 80, 100, 100, 0x9E9E9E);
+            draw_string("Calc", 375, 120, 0x000000);
+            draw_string("Calc", 375, 190, 0xFFFFFF);
 
-            // 4. Settings (Новое приложение)
-            gfx::fill_rect(50, 250, 120, 120, 0x555555);
-            draw_string("Set", 90, 300, 0xFFFFFF);
-            draw_string("Settings", 70, 380, 0xFFFFFF);
+            // 4. Settings
+            gfx::fill_rect(30, 240, 100, 100, 0x555555);
+            draw_string("Set", 60, 280, 0xFFFFFF);
+            draw_string("Settings", 40, 350, 0xFFFFFF);
 
             if (click) {
-                if (mouse_x >= 50 && mouse_x <= 170 && mouse_y >= 70 && mouse_y <= 190) { state = 2; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
-                if (mouse_x >= 250 && mouse_x <= 370 && mouse_y >= 70 && mouse_y <= 190) { state = 3; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
-                if (mouse_x >= 450 && mouse_x <= 570 && mouse_y >= 70 && mouse_y <= 190) { state = 5; calc_display = 0; calc_new_num = true; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
-                if (mouse_x >= 50 && mouse_x <= 170 && mouse_y >= 250 && mouse_y <= 370) { state = 4; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
+                if (mouse_x >= 30 && mouse_x <= 130 && mouse_y >= 80 && mouse_y <= 180) { state = 2; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
+                if (mouse_x >= 190 && mouse_x <= 290 && mouse_y >= 80 && mouse_y <= 180) { state = 3; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
+                if (mouse_x >= 350 && mouse_x <= 450 && mouse_y >= 80 && mouse_y <= 180) { state = 5; calc_display = 0; calc_new_num = true; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
+                if (mouse_x >= 30 && mouse_x <= 130 && mouse_y >= 240 && mouse_y <= 340) { state = 4; play_sound(1000); for(volatile int i=0; i<2000000; i++); stop_sound(); }
             }
 
         } else if (state == 2) {
@@ -351,9 +295,8 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             gfx::fill_screen(0xFFFFFF); 
             gfx::fill_rect(10, 10, 80, 40, 0xEEEEEE);
             draw_string("< Back", 20, 25, 0x000000);
-            draw_string("Mimi Clicker", 300, 25, 0x000000);
-            draw_string("Coins: ", 550, 25, 0xFFAA00);
-            draw_int(coins, 620, 25, 0xFFAA00);
+            draw_string("Coins: ", 300, 25, 0xFFAA00);
+            draw_int(coins, 370, 25, 0xFFAA00);
 
             if (has_auto_click) {
                 auto_click_timer++;
@@ -362,38 +305,37 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 if (auto_click_timer >= target_time) { auto_click_timer = 0; coins += (click_power_level > 0) ? 2 : 1; }
             }
 
-            gfx::fill_rect(20, 440, 180, 60, unlocked_teen ? 0xCCCCCC : 0xEEEEEE);
-            draw_string(unlocked_teen ? "Teen (Owned)" : "Buy Teen", 40, 460, 0x000000);
-            gfx::fill_rect(220, 440, 180, 60, unlocked_cool ? 0xCCCCCC : 0xEEEEEE);
-            draw_string(unlocked_cool ? "Cool (Owned)" : "Buy Cool", 240, 460, 0x000000);
-            gfx::fill_rect(420, 440, 180, 60, 0xEEEEEE);
-            draw_string("Use Mini", 460, 460, 0x000000);
+            // Магазин (3 кнопки в ряд, 2 ряда)
+            gfx::fill_rect(10, 600, 140, 60, unlocked_teen ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(unlocked_teen ? "Teen" : "Buy Teen", 20, 620, 0x000000);
+            gfx::fill_rect(170, 600, 140, 60, unlocked_cool ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(unlocked_cool ? "Cool" : "Buy Cool", 180, 620, 0x000000);
+            gfx::fill_rect(330, 600, 140, 60, 0xEEEEEE);
+            draw_string("Mini", 380, 620, 0x000000);
 
-            gfx::fill_rect(20, 520, 180, 60, has_auto_click ? 0xCCCCCC : 0xEEEEEE);
-            draw_string(has_auto_click ? "Auto (Owned)" : "Buy Auto", 40, 540, 0x000000);
+            gfx::fill_rect(10, 680, 140, 60, has_auto_click ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(has_auto_click ? "Auto" : "Buy Auto", 20, 700, 0x000000);
             int speed_cost = 20 + (auto_speed_level * 10);
-            gfx::fill_rect(220, 520, 180, 60, 0xEEEEEE);
-            draw_string("Speed +1", 260, 540, 0x000000);
-            draw_int(speed_cost, 350, 540, 0x888888);
-            gfx::fill_rect(420, 520, 180, 60, click_power_level > 0 ? 0xCCCCCC : 0xEEEEEE);
-            draw_string(click_power_level > 0 ? "Power (Max)" : "Power +1", 450, 540, 0x000000);
+            gfx::fill_rect(170, 680, 140, 60, 0xEEEEEE);
+            draw_string("Speed+1", 190, 700, 0x000000);
+            gfx::fill_rect(330, 680, 140, 60, click_power_level > 0 ? 0xCCCCCC : 0xEEEEEE);
+            draw_string(click_power_level > 0 ? "Power Max" : "Power+1", 340, 700, 0x000000);
 
             if (click) {
                 if (mouse_x >= 10 && mouse_x <= 90 && mouse_y >= 10 && mouse_y <= 50) { state = 1; }
-                if (mouse_x >= 20 && mouse_x <= 200 && mouse_y >= 440 && mouse_y <= 500) { if (unlocked_teen) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_teen = true; current_mimi = 1; save_settings(); } }
-                if (mouse_x >= 220 && mouse_x <= 400 && mouse_y >= 440 && mouse_y <= 500) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; save_settings(); } }
-                if (mouse_x >= 420 && mouse_x <= 600 && mouse_y >= 440 && mouse_y <= 500) { current_mimi = 0; }
-                if (mouse_x >= 20 && mouse_x <= 200 && mouse_y >= 520 && mouse_y <= 580) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; save_settings(); } }
-                if (mouse_x >= 220 && mouse_x <= 400 && mouse_y >= 520 && mouse_y <= 580) { if (coins >= speed_cost) { coins -= speed_cost; auto_speed_level++; save_settings(); } }
-                if (mouse_x >= 420 && mouse_x <= 600 && mouse_y >= 520 && mouse_y <= 580) { if (click_power_level == 0 && coins >= 30) { coins -= 30; click_power_level = 1; save_settings(); } }
+                if (mouse_x >= 10 && mouse_x <= 150 && mouse_y >= 600 && mouse_y <= 660) { if (unlocked_teen) current_mimi = 1; else if (coins >= 10) { coins -= 10; unlocked_teen = true; current_mimi = 1; save_settings(); } }
+                if (mouse_x >= 170 && mouse_x <= 310 && mouse_y >= 600 && mouse_y <= 660) { if (unlocked_cool) current_mimi = 2; else if (coins >= 25) { coins -= 25; unlocked_cool = true; current_mimi = 2; save_settings(); } }
+                if (mouse_x >= 330 && mouse_x <= 470 && mouse_y >= 600 && mouse_y <= 660) { current_mimi = 0; }
+                if (mouse_x >= 10 && mouse_x <= 150 && mouse_y >= 680 && mouse_y <= 740) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; save_settings(); } }
+                if (mouse_x >= 170 && mouse_x <= 310 && mouse_y >= 680 && mouse_y <= 740) { if (coins >= speed_cost) { coins -= speed_cost; auto_speed_level++; save_settings(); } }
+                if (mouse_x >= 330 && mouse_x <= 470 && mouse_y >= 680 && mouse_y <= 740) { if (click_power_level == 0 && coins >= 30) { coins -= 30; click_power_level = 1; save_settings(); } }
             }
 
             int ox = 0, oy = 0, draw_w = 0, draw_h = 0;
-            if (current_mimi == 0) { draw_h = 250 - squish_pixels; draw_w = img_base_w * draw_h / img_base_h; gfx::draw_image_centered(250, img_base_rle, img_base_size, img_base_w, img_base_h, squish_pixels); }
-            else if (current_mimi == 1) { draw_h = 250 - squish_pixels; draw_w = img_adult_w * draw_h / img_adult_h; gfx::draw_image_centered(250, img_adult_rle, img_adult_size, img_adult_w, img_adult_h, squish_pixels); }
-            else { draw_h = 250 - squish_pixels; draw_w = img_cool_w * draw_h / img_cool_h; gfx::draw_image_centered(250, img_cool_rle, img_cool_size, img_cool_w, img_cool_h, squish_pixels); }
+            if (current_mimi == 0) { draw_h = 350 - squish_pixels; draw_w = img_base_w * draw_h / img_base_h; ox = (480 - draw_w) / 2; oy = 200; gfx::draw_image_scaled(ox, oy, draw_w, draw_h, img_base_rle, img_base_size, img_base_w, img_base_h); }
+            else if (current_mimi == 1) { draw_h = 350 - squish_pixels; draw_w = img_adult_w * draw_h / img_adult_h; ox = (480 - draw_w) / 2; oy = 200; gfx::draw_image_scaled(ox, oy, draw_w, draw_h, img_adult_rle, img_adult_size, img_adult_w, img_adult_h); }
+            else { draw_h = 350 - squish_pixels; draw_w = img_cool_w * draw_h / img_cool_h; ox = (480 - draw_w) / 2; oy = 200; gfx::draw_image_scaled(ox, oy, draw_w, draw_h, img_cool_rle, img_cool_size, img_cool_w, img_cool_h); }
 
-            ox = (800 - draw_w) / 2; oy = (600 - draw_h) / 2 - 50;
             if (click && mouse_x >= ox && mouse_x <= ox + draw_w && mouse_y >= oy && mouse_y <= oy + draw_h) {
                 coins += (click_power_level > 0) ? 2 : 1; 
                 squish_pixels = 4; clicker_dir = 1;    
@@ -407,38 +349,38 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         } else if (state == 3) {
             // ФАЙЛЫ
             gfx::fill_screen(0x1A1A2E);
-            int wx = 100, wy = 50, ww = 600, wh = 500;
+            int wx = 20, wy = 100, ww = 440, wh = 600;
             gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
             gfx::fill_rect(wx, wy, ww, 50, 0x3498DB);
-            draw_string("Files - 5 GB Drive", wx + 20, wy + 15, 0xFFFFFF);
+            draw_string("Files - 5 GB", wx + 20, wy + 15, 0xFFFFFF);
             gfx::fill_rect(wx + ww - 50, wy + 10, 40, 30, 0xE74C3C);
             draw_string("X", wx + ww - 35, wy + 20, 0xFFFFFF);
-            draw_string("Total Space: 5.0 GB", wx + 30, wy + 80, 0x000000);
-            draw_string("Used Space:  0.1 GB", wx + 30, wy + 120, 0x000000);
-            draw_string("Free Space:  4.9 GB", wx + 30, wy + 160, 0x000000);
+            draw_string("Total: 5.0 GB", wx + 30, wy + 80, 0x000000);
+            draw_string("Used:  0.1 GB", wx + 30, wy + 120, 0x000000);
+            draw_string("Free:  4.9 GB", wx + 30, wy + 160, 0x000000);
             if (click && mouse_x >= wx + ww - 50 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 10 && mouse_y <= wy + 40) { state = 1; }
         } else if (state == 4) {
-            // НАСТРОЙКИ (Теперь как приложение)
+            // НАСТРОЙКИ
             gfx::fill_screen(0x1A1A2E);
-            int wx = 150, wy = 100, ww = 500, wh = 400;
+            int wx = 20, wy = 150, ww = 440, wh = 300;
             gfx::fill_rect(wx, wy, ww, wh, 0xFFFFFF);
             gfx::fill_rect(wx, wy, ww, 50, 0x333333);
             draw_string("Settings", wx + 20, wy + 15, 0xFFFFFF);
             gfx::fill_rect(wx + ww - 50, wy + 10, 40, 30, 0xE74C3C);
             draw_string("X", wx + ww - 35, wy + 20, 0xFFFFFF);
 
-            gfx::fill_rect(wx + 20, wy + 80, 460, 60, use_hayricon ? 0x4CAF50 : 0xEEEEEE);
-            draw_string("HayrICons (Icon Swap)", wx + 30, wy + 105, use_hayricon ? 0xFFFFFF : 0x000000);
-            draw_string(use_hayricon ? "ON" : "OFF", wx + 380, wy + 105, use_hayricon ? 0xFFFFFF : 0x000000);
+            gfx::fill_rect(wx + 20, wy + 80, 400, 60, use_hayricon ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("HayrICons", wx + 30, wy + 105, use_hayricon ? 0xFFFFFF : 0x000000);
+            draw_string(use_hayricon ? "ON" : "OFF", wx + 350, wy + 105, use_hayricon ? 0xFFFFFF : 0x000000);
 
             if (click) {
                 if (mouse_x >= wx + ww - 50 && mouse_x <= wx + ww - 10 && mouse_y >= wy + 10 && mouse_y <= wy + 40) { state = 1; }
-                if (mouse_x >= wx + 20 && mouse_x <= wx + 480 && mouse_y >= wy + 80 && mouse_y <= wy + 140) { use_hayricon = !use_hayricon; save_settings(); }
+                if (mouse_x >= wx + 20 && mouse_x <= wx + 420 && mouse_y >= wy + 80 && mouse_y <= wy + 140) { use_hayricon = !use_hayricon; save_settings(); }
             }
         } else if (state == 5) {
             // КАЛЬКУЛЯТОР
             gfx::fill_screen(0x1A1A2E);
-            int wx = 150, wy = 50, ww = 500, wh = 500;
+            int wx = 20, wy = 100, ww = 440, wh = 600;
             gfx::fill_rect(wx, wy, ww, wh, 0x333333);
             
             gfx::fill_rect(wx + 10, wy + 10, 80, 50, 0xE74C3C);
@@ -448,8 +390,8 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_int(calc_display, wx + 30, wy + 110, 0x000000);
 
             const char* labels[16] = {"7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "C", "0", "=", "+"};
-            int bw = 100, bh = 70, gap = 15;
-            int startX = wx + 25, startY = wy + 180;
+            int bw = 90, bh = 80, gap = 10;
+            int startX = wx + 20, startY = wy + 180;
 
             for (int row = 0; row < 4; row++) {
                 for (int col = 0; col < 4; col++) {
@@ -458,11 +400,11 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                     
                     bool is_hover = (mouse_x >= bx && mouse_x <= bx + bw && mouse_y >= by && mouse_y <= by + bh);
                     gfx::fill_rect(bx, by, bw, bh, is_hover ? 0xAAAAAA : 0xEEEEEE);
-                    draw_string(labels[row*4 + col], bx + 40, by + 25, 0x000000);
+                    draw_string(labels[row*4 + col], bx + 35, by + 30, 0x000000);
 
                     if (click && is_hover) {
                         int btn_idx = row * 4 + col;
-                        play_sound(1500); for(volatile int i=0; i<1000000; i++); stop_sound(); // Звук клика
+                        play_sound(1500); for(volatile int i=0; i<1000000; i++); stop_sound();
                         if (btn_idx == 12) { calc_display = 0; calc_new_num = true; }
                         else if (btn_idx == 14) {
                             if (calc_op == 1) calc_display = calc_stored + calc_display;
@@ -490,23 +432,22 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             if (click && mouse_x >= wx + 10 && mouse_x <= wx + 90 && mouse_y >= wy + 10 && mouse_y <= wy + 60) { state = 1; }
         }
 
-        // Меню питания (вызывается кнопкой Power)
         if (power_menu_open) {
-            gfx::fill_rect(200, 150, 400, 200, 0x222222);
-            gfx::fill_rect(200, 150, 400, 40, 0x333333);
-            draw_string("Power Menu", 220, 160, 0xFFFFFF);
-            gfx::fill_rect(540, 155, 50, 30, 0xE74C3C);
-            draw_string("X", 560, 165, 0xFFFFFF);
+            gfx::fill_rect(40, 250, 400, 200, 0x222222);
+            gfx::fill_rect(40, 250, 400, 40, 0x333333);
+            draw_string("Power Menu", 60, 260, 0xFFFFFF);
+            gfx::fill_rect(390, 255, 40, 30, 0xE74C3C);
+            draw_string("X", 405, 265, 0xFFFFFF);
 
-            gfx::fill_rect(250, 220, 300, 50, 0xE74C3C);
-            draw_string("Restart", 370, 235, 0xFFFFFF);
-            gfx::fill_rect(250, 280, 300, 50, 0xE74C3C);
-            draw_string("Shutdown", 365, 295, 0xFFFFFF);
+            gfx::fill_rect(70, 320, 340, 50, 0xE74C3C);
+            draw_string("Restart", 190, 335, 0xFFFFFF);
+            gfx::fill_rect(70, 380, 340, 50, 0xE74C3C);
+            draw_string("Shutdown", 180, 395, 0xFFFFFF);
 
             if (click) {
-                if (mouse_x >= 540 && mouse_x <= 590 && mouse_y >= 155 && mouse_y <= 185) { power_menu_open = false; }
-                if (mouse_x >= 250 && mouse_x <= 550 && mouse_y >= 220 && mouse_y <= 270) { reboot(); }
-                if (mouse_x >= 250 && mouse_x <= 550 && mouse_y >= 280 && mouse_y <= 330) { shutdown(); }
+                if (mouse_x >= 390 && mouse_x <= 430 && mouse_y >= 255 && mouse_y <= 285) { power_menu_open = false; }
+                if (mouse_x >= 70 && mouse_x <= 410 && mouse_y >= 320 && mouse_y <= 370) { reboot(); }
+                if (mouse_x >= 70 && mouse_x <= 410 && mouse_y >= 380 && mouse_y <= 430) { shutdown(); }
             }
         }
 
