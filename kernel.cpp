@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Mobile Portrait (Fixed with proper drain)
+//  iMimi OS — Mobile Portrait (Settings & Input Control)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -34,12 +34,7 @@ namespace mouse {
     void write(u8 v) { wait_w(); outb(0x64, 0xD4); wait_w(); outb(0x60, v); }
     u8   read() { return wait_r() ? inb(0x60) : 0; }
 
-    void drain() {
-        for (int i = 0; i < 100; i++) {
-            if (!(inb(0x64) & 1)) break;
-            inb(0x60);
-        }
-    }
+    void drain() { for (int i = 0; i < 100; i++) { if (!(inb(0x64) & 1)) break; inb(0x60); } }
 
     void init() {
         wait_w(); outb(0x64, 0xA8);
@@ -49,9 +44,9 @@ namespace mouse {
         status &= ~0x02;   // Disable IRQ12
         wait_w(); outb(0x64, 0x60);
         wait_w(); outb(0x60, status);
-        write(0xF6); read(); read(); read(); // Reset (ACK + BAT + ID)
-        write(0xF4); read(); // Enable Data Reporting (ACK)
-        drain(); // Очищаем всё лишнее из буфера
+        write(0xF6); read(); read(); read(); // Reset
+        write(0xF4); read(); // Enable
+        drain();
     }
 
     bool feed(u8 b) {
@@ -65,8 +60,7 @@ namespace mouse {
         int dy = pkt[2];
         if (pkt[0] & 0x20) dy = -dy;
 
-        x += dx;
-        y -= dy;
+        x += dx; y -= dy;
         if (x < 0) x = 0; if (x > 479) x = 479;
         if (y < 0) y = 0; if (y > 799) y = 799;
         
@@ -75,7 +69,13 @@ namespace mouse {
     }
 }
 
+// --- ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
+bool use_touch = false;
+bool use_mouse = true;
+bool use_kb_mouse = true;
 bool use_hayricon = false;
+
+bool kb_click_pending = false;
 int coins = 0;
 bool unlocked_teen = false;
 bool unlocked_cool = false;
@@ -100,21 +100,39 @@ void stop_sound() { outb(0x61, inb(0x61) & 0xFC); }
 
 u8 cmos_read(u8 reg) { outb(0x70, reg); return inb(0x71); }
 void cmos_write(u8 reg, u8 val) { outb(0x70, (reg | 0x80)); outb(0x71, val); outb(0x70, 0); }
+
 void save_settings() {
-    cmos_write(0x40, use_hayricon ? 8 : 0);
+    u8 flags = 0;
+    if (use_touch) flags |= 1;
+    if (use_mouse) flags |= 2;
+    if (use_kb_mouse) flags |= 4;
+    if (use_hayricon) flags |= 8;
+    cmos_write(0x40, flags);
+
     cmos_write(0x41, (u8)(coins >> 24)); cmos_write(0x42, (u8)(coins >> 16)); cmos_write(0x43, (u8)(coins >> 8)); cmos_write(0x44, (u8)coins);
     cmos_write(0x45, (unlocked_teen?1:0) | (unlocked_cool?2:0) | (has_auto_click?4:0));
     cmos_write(0x46, (u8)auto_speed_level); cmos_write(0x47, (u8)click_power_level); cmos_write(0x48, (u8)volume);
 }
+
 void load_settings() {
-    u8 flags = cmos_read(0x40); if (flags == 0xFF) return;
+    u8 flags = cmos_read(0x40);
+    if (flags == 0xFF) return; // Первый запуск
+    use_touch = (flags & 1) != 0;
+    use_mouse = (flags & 2) != 0;
+    use_kb_mouse = (flags & 4) != 0;
     use_hayricon = (flags & 8) != 0;
+
     coins = (cmos_read(0x41) << 24) | (cmos_read(0x42) << 16) | (cmos_read(0x43) << 8) | cmos_read(0x44);
     u8 g = cmos_read(0x45);
     unlocked_teen = (g & 1); unlocked_cool = (g & 2); has_auto_click = (g & 4);
     auto_speed_level = cmos_read(0x46); click_power_level = cmos_read(0x47); volume = cmos_read(0x48);
-    if (volume > 100) volume = 50; if (coins < 0) coins = 0;
+    
+    if (volume > 100) volume = 50;
+    if (coins < 0) coins = 0;
+    // Защита: если всё отключено, включаем мышь
+    if (!use_touch && !use_mouse && !use_kb_mouse) use_mouse = true;
 }
+
 void reboot() { save_settings(); outb(0x64, 0xFE); }
 void shutdown() { save_settings(); outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
@@ -241,8 +259,20 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         u8 st = inb(0x64);
         if (st & 1) {
             u8 b = inb(0x60);
-            if (st & 0x20) { mouse::feed(b); }
-            else {
+            if (st & 0x20) { 
+                // МЫШЬ
+                if (use_mouse || use_touch) mouse::feed(b);
+            } else {
+                // КЛАВИАТУРА
+                if (use_kb_mouse) {
+                    if (b == 0x48 || b == 0x11) { mouse::y -= 20; if(mouse::y < 0) mouse::y = 0; }
+                    if (b == 0x50 || b == 0x1F) { mouse::y += 20; if(mouse::y > 799) mouse::y = 799; }
+                    if (b == 0x4B || b == 0x1E) { mouse::x -= 20; if(mouse::x < 0) mouse::x = 0; }
+                    if (b == 0x4D || b == 0x20) { mouse::x += 20; if(mouse::x > 479) mouse::x = 479; }
+                    if (b == 0x1C || b == 0x39) kb_click_pending = true;
+                    if (b == 0x01) { mouse::x = 10; mouse::y = 10; kb_click_pending = true; }
+                }
+                // Служебные кнопки работают всегда
                 if (b == 0x3B) power_menu_open = !power_menu_open;
                 if (b == 0x3C) { if (volume < 100) volume += 10; save_settings(); }
                 if (b == 0x3D) { if (volume > 0) volume -= 10; save_settings(); }
@@ -250,7 +280,8 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         }
 
         u8 cur_btn = mouse::btn;
-        bool click = (cur_btn & 1) && !(prev_btn & 1);
+        bool click = ((cur_btn & 1) && !(prev_btn & 1)) || kb_click_pending;
+        kb_click_pending = false;
         prev_btn = cur_btn;
 
         int mx = mouse::x;
@@ -259,7 +290,7 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
         if (state == 1) {
             gfx::fill_screen(0x1A1A2E); gfx::fill_rect(0, 0, 480, 40, 0x111122);
             draw_string("12:00", 20, 15, 0xFFFFFF); draw_string("VOL:", 350, 15, 0x888888); draw_int(volume, 400, 15, 0xFFFFFF);
-            draw_string("v5", 460, 15, 0x666666);
+            draw_string("v6", 460, 15, 0x666666);
 
             if (use_hayricon) gfx::draw_image_scaled(30, 80, 100, 100, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
             else gfx::draw_image_scaled(30, 80, 100, 100, img_base_rle, img_base_size, img_base_w, img_base_h);
@@ -307,14 +338,39 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
             draw_string("Total: 5.0 GB", wx+30, wy+80, 0x000000); draw_string("Used:  0.1 GB", wx+30, wy+120, 0x000000); draw_string("Free:  4.9 GB", wx+30, wy+160, 0x000000);
             if (click && mx >= wx+ww-50 && mx <= wx+ww-10 && my >= wy+10 && my <= wy+40) state = 1;
         } else if (state == 4) {
-            gfx::fill_screen(0x1A1A2E); int wx=20,wy=150,ww=440,wh=300;
+            gfx::fill_screen(0x1A1A2E); int wx=20,wy=100,ww=440,wh=520;
             gfx::fill_rect(wx,wy,ww,wh,0xFFFFFF); gfx::fill_rect(wx,wy,ww,50,0x333333);
             draw_string("Settings", wx+20, wy+15, 0xFFFFFF); gfx::fill_rect(wx+ww-50, wy+10, 40, 30, 0xE74C3C); draw_string("X", wx+ww-35, wy+20, 0xFFFFFF);
-            gfx::fill_rect(wx+20, wy+80, 400, 60, use_hayricon ? 0x4CAF50 : 0xEEEEEE);
-            draw_string("HayrICons", wx+30, wy+105, use_hayricon?0xFFFFFF:0x000000); draw_string(use_hayricon?"ON":"OFF", wx+350, wy+105, use_hayricon?0xFFFFFF:0x000000);
+            
+            // Touchscreen
+            gfx::fill_rect(wx+20, wy+70, 400, 60, use_touch ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Touchscreen", wx+30, wy+95, use_touch?0xFFFFFF:0x000000); 
+            draw_string(use_touch?"ON":"OFF", wx+350, wy+95, use_touch?0xFFFFFF:0x000000);
+            
+            // Mouse
+            gfx::fill_rect(wx+20, wy+140, 400, 60, use_mouse ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Mouse", wx+30, wy+165, use_mouse?0xFFFFFF:0x000000); 
+            draw_string(use_mouse?"ON":"OFF", wx+350, wy+165, use_mouse?0xFFFFFF:0x000000);
+            
+            // Keyboard Mouse
+            gfx::fill_rect(wx+20, wy+210, 400, 60, use_kb_mouse ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("Keyboard Mouse", wx+30, wy+235, use_kb_mouse?0xFFFFFF:0x000000); 
+            draw_string(use_kb_mouse?"ON":"OFF", wx+350, wy+235, use_kb_mouse?0xFFFFFF:0x000000);
+            
+            // HayrICons
+            gfx::fill_rect(wx+20, wy+280, 400, 60, use_hayricon ? 0x4CAF50 : 0xEEEEEE);
+            draw_string("HayrICons", wx+30, wy+305, use_hayricon?0xFFFFFF:0x000000); 
+            draw_string(use_hayricon?"ON":"OFF", wx+350, wy+305, use_hayricon?0xFFFFFF:0x000000);
+
+            draw_string("Note: Needs restart", wx+20, wy+370, 0x888888);
+            draw_string("for HayrICons.", wx+20, wy+390, 0x888888);
+
             if (click) {
                 if (mx >= wx+ww-50 && mx <= wx+ww-10 && my >= wy+10 && my <= wy+40) state = 1;
-                if (mx >= wx+20 && mx <= wx+420 && my >= wy+80 && my <= wy+140) { use_hayricon = !use_hayricon; save_settings(); }
+                if (mx >= wx+20 && mx <= wx+420 && my >= wy+70 && my <= wy+130) { use_touch = !use_touch; save_settings(); }
+                if (mx >= wx+20 && mx <= wx+420 && my >= wy+140 && my <= wy+200) { use_mouse = !use_mouse; save_settings(); }
+                if (mx >= wx+20 && mx <= wx+420 && my >= wy+210 && my <= wy+270) { use_kb_mouse = !use_kb_mouse; save_settings(); }
+                if (mx >= wx+20 && mx <= wx+420 && my >= wy+280 && my <= wy+340) { use_hayricon = !use_hayricon; save_settings(); }
             }
         } else if (state == 5) {
             gfx::fill_screen(0x1A1A2E); int wx=20,wy=100,ww=440,wh=600;
