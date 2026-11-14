@@ -6,7 +6,7 @@ CFLAGS   = -m32 -ffreestanding -fno-exceptions -fno-rtti -O2 -Wall -Wextra \
            -fno-pic -fno-pie -std=c++11
 LDFLAGS  = -m elf_i386 -T linker.ld
 
-OBJS = boot.o kernel.o gfx.o text.o \
+OBJS = boot.o libc.o kernel.o gfx.o text.o \
        drivermouse.o driverkeyboard.o drivernetwork.o installerdriver.o \
        app_cliapp.o app_files.o app_browser.o app_installer.o \
        app_clicker.o app_calc.o app_settings.o
@@ -20,7 +20,7 @@ all: imimi.iso
 	$(AS) -f elf32 $< -o $@
 
 imimi.bin: $(OBJS) linker.ld
-	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS) -lgcc
 
 imimi.iso: imimi.bin grub.cfg
 	@rm -rf iso

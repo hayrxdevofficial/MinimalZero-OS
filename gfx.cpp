@@ -26,17 +26,17 @@ namespace gfx {
     u32  width() { return W; }
     u32  height() { return H; }
 
-    inline void put(int x, int y, u32 c) {
+    void put(int x, int y, u32 c) {
         if ((u32)x >= W || (u32)y >= H) return;
         back[y * W + x] = c;
     }
 
-    inline u32 get(int x, int y) {
+    u32 get(int x, int y) {
         if ((u32)x >= W || (u32)y >= H) return 0;
         return back[y * W + x];
     }
 
-    inline u32 blend(u32 d, u32 s, u32 a) {
+    static inline u32 blend(u32 d, u32 s, u32 a) {
         u32 rb = (((d & 0xFF00FF) * (256 - a) + (s & 0xFF00FF) * a) >> 8) & 0xFF00FF;
         u32 g  = (((d & 0x00FF00) * (256 - a) + (s & 0x00FF00) * a) >> 8) & 0x00FF00;
         return rb | g;
@@ -126,7 +126,6 @@ namespace gfx {
     }
 
     void outline_round(int x, int y, int w, int h, int r, u32 c) {
-        // аппроксимация — рисуем контур
         for (int j = 0; j < h; j++) {
             int dy = j < h - 1 - j ? j : h - 1 - j;
             int ins = dy < r ? inset(r, dy) : 0;
@@ -162,14 +161,13 @@ namespace gfx {
         }
     }
 
-    inline u32 rgb565(u16 c) {
+    u32 rgb565(u16 c) {
         u32 r = ((c >> 11) & 0x1F) * 255 / 31;
         u32 g = ((c >>  5) & 0x3F) * 255 / 63;
         u32 b = ( c        & 0x1F) * 255 / 31;
         return (r << 16) | (g << 8) | b;
     }
 
-    // RLE-картинка (с совместимостью с прошлым форматом)
     void image(int ox, int oy, int dw, int dh, const u16* rle, u32 size, int iw, int ih) {
         u32 idx = 0; int x = 0, y = 0;
         while (idx < size && y < ih) {

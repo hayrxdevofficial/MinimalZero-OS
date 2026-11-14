@@ -13,28 +13,12 @@ static inline u8   inb(u16 p)         { u8 v; asm volatile("inb %1,%0" : "=a"(v)
 static inline void outw(u16 p, u16 v) { asm volatile("outw %0,%1" :: "a"(v), "Nd"(p)); }
 static inline u16  inw(u16 p)         { u16 v; asm volatile("inw %1,%0" : "=a"(v) : "Nd"(p)); return v; }
 
+// ====== Объявления mem* (реализация в libc.cpp) ======
 extern "C" {
-void* memset(void* d, int c, unsigned int n) {
-    u8* p = (u8*)d;
-    while (n--) { *p++ = (u8)c; }
-    return d;
-}
-void* memcpy(void* d, const void* s, unsigned int n) {
-    u8* a = (u8*)d; const u8* b = (const u8*)s;
-    while (n--) { *a++ = *b++; }
-    return d;
-}
-void* memmove(void* d, const void* s, unsigned int n) {
-    u8* a = (u8*)d; const u8* b = (const u8*)s;
-    if (a < b) { while (n--) { *a++ = *b++; } }
-    else { a += n; b += n; while (n--) { *--a = *--b; } }
-    return d;
-}
-int memcmp(const void* a, const void* b, unsigned int n) {
-    const u8* x = (const u8*)a; const u8* y = (const u8*)b;
-    while (n--) { if (*x != *y) return *x - *y; x++; y++; }
-    return 0;
-}
+void* memset(void* d, int c, unsigned int n);
+void* memcpy(void* d, const void* s, unsigned int n);
+void* memmove(void* d, const void* s, unsigned int n);
+int   memcmp(const void* a, const void* b, unsigned int n);
 }
 
 struct multiboot_info {
@@ -89,7 +73,7 @@ u32 time_ms();
 void time_init();
 void rtc_get(int& h, int& m, int& s);
 
-// ====== CMOS (хранение настроек) — ДОБАВЛЕНО! ======
+// ====== CMOS ======
 u8 cmos_read(u8 reg);
 void cmos_write(u8 reg, u8 val);
 
@@ -139,7 +123,7 @@ void fs_init();
 bool fs_reachable(int idx);
 void fs_path(int idx, char* out, int max);
 
-// ====== GFX namespace ======
+// ====== GFX ======
 namespace gfx {
     void init(multiboot_info* mb);
     bool is_ok();
@@ -165,7 +149,7 @@ namespace gfx {
     u32  rgb565(u16 c);
 }
 
-// ====== TEXT namespace ======
+// ====== TEXT ======
 namespace text {
     void draw_char(char c, int x, int y, u32 color, int scale = 1);
     void draw(const char* s, int x, int y, u32 color, int scale = 1);
@@ -177,31 +161,17 @@ namespace text {
     void draw_truncated(const char* s, int x, int y, int w, u32 color);
 }
 
-// ====== MOUSE namespace ======
-namespace mouse {
-    void init();
-    bool feed(u8 b);
-}
+// ====== MOUSE / KBD ======
+namespace mouse { void init(); bool feed(u8 b); }
+namespace kbd   { void feed(u8 b); }
 
-// ====== KBD namespace ======
-namespace kbd {
-    void feed(u8 b);
-}
-
-// ============================================================
-//  UI helpers
-// ============================================================
-
+// ====== UI helpers ======
 struct R { int x, y, w, h; };
 
 static inline bool hit(const R& r, int px, int py) {
     return px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
 }
-
-static inline bool hov(const R& r) {
-    return hit(r, g_mx, g_my);
-}
-
+static inline bool hov(const R& r) { return hit(r, g_mx, g_my); }
 static inline bool hit_rect(int rx, int ry, int rw, int rh, int px, int py) {
     return px >= rx && px < rx + rw && py >= ry && py < ry + rh;
 }
