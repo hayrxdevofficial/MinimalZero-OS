@@ -185,7 +185,7 @@ namespace kbd {
 }
 
 // ============================================================
-//  UI helpers — ПОСЛЕ gfx и text, ДО apps.h
+//  UI helpers
 // ============================================================
 
 struct R { int x, y, w, h; };
@@ -193,8 +193,14 @@ struct R { int x, y, w, h; };
 static inline bool hit(const R& r, int px, int py) {
     return px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
 }
+
 static inline bool hov(const R& r) {
     return hit(r, g_mx, g_my);
+}
+
+// ВАЖНО: hit_rect с 6 аргументами (координаты + размер)
+static inline bool hit_rect(int rx, int ry, int rw, int rh, int px, int py) {
+    return px >= rx && px < rx + rw && py >= ry && py < ry + rh;
 }
 
 static inline void btn(const R& r, const char* lb, u32 col, u32 tc, bool en = true) {
