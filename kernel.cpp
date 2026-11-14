@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Calculator, HayrICons & Dynamic Boot (Dark Mode)
+//  iMimi OS — Calculator, HayrICons & Dynamic Boot (Fixed)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -43,9 +43,9 @@ bool power_menu_open = false;
 u8 mouse_cycle = 0;
 u8 mouse_byte[3];
 
-// Переменные калькулятора
-long long calc_display = 0;
-long long calc_stored = 0;
+// Переменные калькулятора (теперь int вместо long long)
+int calc_display = 0;
+int calc_stored = 0;
 int calc_op = 0; 
 bool calc_new_num = true;
 
@@ -180,7 +180,8 @@ void draw_char(char c, int x, int y, u32 color) {
 void draw_string(const char* s, int x, int y, u32 color) {
     while (*s) { draw_char(*s++, x, y, color); x += 8; }
 }
-void draw_int(long long num, int x, int y, u32 color) {
+// Изменили long long на int для draw_int
+void draw_int(int num, int x, int y, u32 color) {
     char buf[24]; int i = 0;
     if (num == 0) { draw_char('0', x, y, color); return; }
     bool neg = num < 0; if (neg) num = -num;
@@ -218,10 +219,9 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
     int squish_pixels = 0; 
     int clicker_dir = 0;     
 
-    // ДИНАМИЧЕСКАЯ ЗАГРУЗКА (Черно-серая для Hayrulla)
-    u32 boot_bg = use_hayricon ? 0x121212 : 0xFFFFFF; // Темно-серый / Белый
-    u32 bar_bg = use_hayricon ? 0x333333 : 0xDDDDDD;  // Серый фон бара / Светло-серый
-    u32 bar_color = use_hayricon ? 0xFFFFFF : 0xFF69B4; // Белый / Розовый
+    u32 boot_bg = use_hayricon ? 0x121212 : 0xFFFFFF; 
+    u32 bar_bg = use_hayricon ? 0x333333 : 0xDDDDDD;  
+    u32 bar_color = use_hayricon ? 0xFFFFFF : 0xFF69B4; 
 
     int progress = 0;
     for(volatile u32 i = 0; i < 600000000; i++) {
@@ -384,7 +384,6 @@ extern "C" void kmain(multiboot_info* mb, u32 magic) {
                 if (mouse_x >= wx + 20 && mouse_x <= wx + 380 && mouse_y >= wy + 200 && mouse_y <= wy + 240) { use_hayricon = !use_hayricon; }
             }
         } else if (state == 5) {
-            // КАЛЬКУЛЯТОР
             gfx::fill_screen(0x1A1A2E);
             int wx = 250, wy = 100, ww = 300, wh = 400;
             gfx::fill_rect(wx, wy, ww, wh, 0x333333);
