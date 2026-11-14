@@ -1,10 +1,7 @@
 #include "common.h"
 
-int g_mx = 512, g_my = 384;
-u8  g_mbtn = 0;
-bool g_press = false, g_release = false;
-int g_px = 0, g_py = 0;
-int g_mspeed = 1;
+// Все глобальные переменные определены ТОЛЬКО в kernel.cpp
+// Здесь только использование
 
 namespace mouse {
     u8 pkt[3]; int idx = 0;

@@ -81,7 +81,8 @@ u32 time_ms() {
     u32 lo, hi;
     asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
     u64 now = ((u64)hi << 32) | lo;
-    return (u32)((now - tsc_base) / 3000000ULL);
+    u32 delta = (u32)(now - tsc_base);
+    return delta / 3000000;
 }
 
 // ============================================================

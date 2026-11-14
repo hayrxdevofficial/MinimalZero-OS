@@ -1,7 +1,5 @@
 #include "common.h"
 
-int g_scr_w = 1024, g_scr_h = 768;
-
 namespace gfx {
     static u8* fb = nullptr;
     static u32 W = 1024, H = 768, pitch = 0;

@@ -20,7 +20,7 @@ all: imimi.iso
 	$(AS) -f elf32 $< -o $@
 
 imimi.bin: $(OBJS) linker.ld
-	$(LD) $(LDFLAGS) -o $@ $(OBJS) -lgcc
+	$(LD) $(LDFLAGS) -o $@ $(OBJS)
 
 imimi.iso: imimi.bin grub.cfg
 	@rm -rf iso
