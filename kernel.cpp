@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — Mobile Portrait Edition (480x800, 3s Boot)
+//  iMimi OS — Mobile Portrait (Safe Polling, No Triple Fault)
 // ============================================================
 
 typedef unsigned char       u8;
@@ -43,43 +43,17 @@ int calc_stored = 0;
 int calc_op = 0; 
 bool calc_new_num = true;
 
-// --- БЕЗОПАСНЫЕ ПРЕРЫВАНИЯ ---
-struct IDT_entry { u16 base_low; u16 sel; u8 zero; u8 flags; u16 base_high; } __attribute__((packed));
-struct IDT_ptr { u16 limit; u32 base; } __attribute__((packed));
-IDT_entry idt[256];
-IDT_ptr idtp;
-
-extern "C" void isr0(); extern "C" void isr1(); extern "C" void isr12(); 
-
-asm(
-".global isr0\n isr0:\n pusha\n movb $0x20, %al\n outb %al, $0x20\n popa\n iret\n"
-".global isr1\n isr1:\n pusha\n movb $0x20, %al\n outb %al, $0x20\n popa\n iret\n"
-".global isr12\n isr12:\n pusha\n movb $0x20, %al\n outb %al, $0xA0\n outb %al, $0x20\n popa\n iret\n"
-);
-
-void init_idt() {
-    idtp.limit = (sizeof(IDT_entry) * 256) - 1; idtp.base = (u32)&idt;
-    for(int i = 0; i < 256; i++) { idt[i].base_low = 0; idt[i].sel = 0; idt[i].zero = 0; idt[i].flags = 0; idt[i].base_high = 0; }
-    u32 b0 = (u32)isr0; idt[0x20].base_low = b0 & 0xFFFF; idt[0x20].sel = 0x08; idt[0x20].flags = 0x8E; idt[0x20].base_high = (b0 >> 16) & 0xFFFF;
-    u32 b1 = (u32)isr1; idt[0x21].base_low = b1 & 0xFFFF; idt[0x21].sel = 0x08; idt[0x21].flags = 0x8E; idt[0x21].base_high = (b1 >> 16) & 0xFFFF;
-    u32 b12 = (u32)isr12; idt[0x2C].base_low = b12 & 0xFFFF; idt[0x2C].sel = 0x08; idt[0x2C].flags = 0x8E; idt[0x2C].base_high = (b12 >> 16) & 0xFFFF;
-    asm volatile("lidt (%0)" :: "r"(&idtp));
-}
-
-void init_pic() {
-    outb(0x20, 0x11); io_wait(); outb(0xA0, 0x11); io_wait();
-    outb(0x21, 0x20); io_wait(); outb(0xA1, 0x28); io_wait();
-    outb(0x21, 0x04); io_wait(); outb(0xA1, 0x02); io_wait();
-    outb(0x21, 0x01); io_wait(); outb(0xA1, 0x01); io_wait();
-    outb(0x21, 0x00); outb(0xA1, 0x00); outb(0x21, 0xF6); outb(0xA1, 0xEF); 
-}
-
+// --- ИНИЦИАЛИЗАЦИЯ МЫШИ (Без прерываний) ---
 void init_mouse() {
-    outb(0x64, 0xA8); outb(0x64, 0x20); io_wait();
-    u8 status = inb(0x60) | 2; outb(0x64, 0x60); io_wait(); outb(0x60, status);
-    outb(0x64, 0xD4); outb(0x60, 0xF4); io_wait(); inb(0x60);
+    outb(0x64, 0xA8); // Активируем порт мыши
+    outb(0x64, 0x20); io_wait();
+    u8 status = inb(0x60) | 2; // Включаем IRQ (хотя мы его не используем, v86 это любит)
+    outb(0x64, 0x60); io_wait(); outb(0x60, status);
+    outb(0x64, 0xD4); outb(0x60, 0xF4); // Включаем передачу данных
+    io_wait(); inb(0x60);
 }
 
+// --- ЗВУК ---
 void play_sound(u32 freq) {
     if (volume == 0) return;
     u32 div = 1193180 / freq;
@@ -88,6 +62,7 @@ void play_sound(u32 freq) {
 }
 void stop_sound() { outb(0x61, inb(0x61) & 0xFC); }
 
+// --- СОХРАНЕНИЕ ---
 u8 cmos_read(u8 reg) { outb(0x70, reg); return inb(0x71); }
 void cmos_write(u8 reg, u8 val) { outb(0x70, (reg | 0x80)); outb(0x71, val); outb(0x70, 0); }
 void save_settings() {
@@ -109,12 +84,15 @@ void load_settings() {
 void reboot() { save_settings(); outb(0x64, 0xFE); }
 void shutdown() { save_settings(); outw(0x604, 0x2000); while(1) asm volatile("cli; hlt"); }
 
+// --- ОПРОС ВВОДА (Безопасный) ---
 void poll_inputs() {
-    for (int i = 0; i < 16; i++) {
-        u8 status = inb(0x64); if (!(status & 1)) break;
+    for (int i = 0; i < 32; i++) {
+        u8 status = inb(0x64); 
+        if (!(status & 1)) break; // Нет данных
         u8 data = inb(0x60);
-        if (status & 0x20) {
-            if (mouse_cycle == 0 && !(data & 0x08)) continue;
+        
+        if (status & 0x20) { // Это данные от мыши
+            if (mouse_cycle == 0 && !(data & 0x08)) continue; // Ждем первый байт с флагом 0x08
             mouse_byte[mouse_cycle++] = data;
             if (mouse_cycle == 3) {
                 mouse_cycle = 0;
@@ -125,7 +103,7 @@ void poll_inputs() {
                     mouse_x += dx; mouse_y -= dy;
                 }
             }
-        } else {
+        } else { // Это данные от клавиатуры
             if (data == 0x3B) power_menu_open = !power_menu_open;
             if (data == 0x3C) { if (volume < 100) volume += 10; save_settings(); }
             if (data == 0x3D) { if (volume > 0) volume -= 10; save_settings(); }
@@ -133,8 +111,11 @@ void poll_inputs() {
     }
 }
 
+// --- ГРАФИКА ---
 namespace gfx {
-    static u8* fb = nullptr; static u32 W = 480, H = 800, pitch = 0; static u8 bpp = 32;
+    static u8* fb = nullptr; 
+    static u32 W = 480, H = 800, pitch = 0; 
+    static u8 bpp = 32;
     static u32 back_buffer[480 * 800]; 
 
     void init(multiboot_info* mb) {
@@ -237,27 +218,30 @@ void draw_cursor(int x, int y) {
     gfx::fill_rect(x-3, y-3, 6, 6, 0xFFFFFF);
 }
 
+// ============================================================
+//  ОСНОВНАЯ ЛОГИКА
+// ============================================================
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
-    (void)magic; gfx::init(mb); 
-    init_idt(); init_pic(); init_mouse(); asm volatile("sti");
+    (void)magic; 
+    gfx::init(mb); 
+    init_mouse(); // Только инициализация, никаких прерываний
     load_settings(); 
     
     int state = 0; int current_mimi = 0; int squish_pixels = 0; int clicker_dir = 0;     
     u32 boot_bg = use_hayricon ? 0x121212 : 0xFFFFFF; 
 
-    // ЗАГРУЗКА (3 СЕКУНДЫ)
+    // 3 СЕКУНДЫ ЗАГРУЗКИ
     gfx::fill_screen(boot_bg); 
     if (use_hayricon) gfx::draw_image_scaled(110, 200, 260, 260, img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h);
     else gfx::draw_image_scaled(110, 200, 260, 260, img_base_rle, img_base_size, img_base_w, img_base_h);
     gfx::swap();
     
-    // Точная задержка на 3 секунды
     for(volatile u32 i = 0; i < 180000000; i++); 
 
     state = 1; 
 
     while (1) {
-        poll_inputs(); 
+        poll_inputs(); // ОПРОС ВМЕСТО ПРЕРЫВАНИЙ
         bool click = mouse_left_clicked; mouse_left_clicked = false;
 
         if (mouse_x < 0) mouse_x = 0; if (mouse_x > 479) mouse_x = 479;
