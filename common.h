@@ -64,7 +64,7 @@ static inline int itoa_(int v, char* buf) {
     buf[i] = 0; return i;
 }
 
-// ====== Общие глобальные переменные ======
+// ====== Глобальные переменные ======
 extern int  g_scr_w, g_scr_h;
 extern int  g_mx, g_my;
 extern u8   g_mbtn;
@@ -72,6 +72,24 @@ extern bool g_press, g_release;
 extern int  g_px, g_py;
 extern int  g_mspeed;
 extern u32  g_ticks;
+extern int  g_volume;
+extern bool g_kb_mouse, g_hayricon;
+extern int  g_coins;
+extern bool g_teen_unlocked, g_cool_unlocked, g_auto_click;
+extern int  g_auto_level, g_click_power;
+extern int  g_cur_skin;
+
+// ====== Время ======
+u32 time_ms();
+void time_init();
+void rtc_get(int& h, int& m, int& s);
+
+// ====== Звук ======
+void beep(u32 freq, u32 ms);
+
+// ====== Сохранения ======
+void settings_save();
+void settings_load();
 
 // ====== Клавиатура ======
 enum { K_UP=0x101, K_DOWN, K_LEFT, K_RIGHT, K_DEL, K_HOME, K_END,
@@ -86,24 +104,77 @@ void net_close_browser();
 void net_download(const char* url, const char* saveas);
 void net_run_js(const char* app_name);
 int  net_poll_byte();
+int  net_receive_file(u8* out, int max_sz);
 
-// ====== Время ======
-u32 time_ms();
-u8 cmos_read(u8 reg);
-void cmos_write(u8 reg, u8 val);
-void rtc_get(int& h, int& m, int& s);
+// ====== Файловая система ======
+#define MAXN    128
+#define NAMELEN 32
+#define DATALEN 1024
 
-// ====== Звук ======
-void beep(u32 freq, u32 ms);
-void sound_stop();
-extern int g_volume;
+struct Node {
+    bool used, dir, trashed;
+    int parent;
+    char name[NAMELEN];
+    int len;
+    char data[DATALEN];
+};
 
-// ====== Сохранения ======
-void settings_save();
-void settings_load();
-extern bool g_kb_mouse;
-extern bool g_hayricon;
-extern int  g_coins;
-extern bool g_teen_unlocked, g_cool_unlocked, g_auto_click;
-extern int  g_auto_level, g_click_power;
-extern int  g_cur_skin;
+extern Node fs[MAXN];
+extern int fs_docs, fs_pics;
+
+int  fs_new(int par, const char* nm, bool dir);
+void fs_set_txt(int idx, const char* t);
+int  fs_list(int par, int* out, int max);
+void fs_destroy(int idx);
+void fs_init();
+bool fs_reachable(int idx);
+void fs_path(int idx, char* out, int max);
+
+// ====== GFX namespace ======
+namespace gfx {
+    void init(multiboot_info* mb);
+    bool is_ok();
+    u32  width();
+    u32  height();
+    void put(int x, int y, u32 c);
+    u32  get(int x, int y);
+    void rect(int x, int y, int w, int h, u32 c);
+    void rect_a(int x, int y, int w, int h, u32 c, u32 a);
+    void grad_v(int x, int y, int w, int h, u32 c1, u32 c2);
+    void grad_h(int x, int y, int w, int h, u32 c1, u32 c2);
+    void round(int x, int y, int w, int h, int r, u32 c);
+    void round_a(int x, int y, int w, int h, int r, u32 c, u32 a);
+    void outline(int x, int y, int w, int h, u32 c);
+    void outline_round(int x, int y, int w, int h, int r, u32 c);
+    void circle(int cx, int cy, int r, u32 c);
+    void circle_a(int cx, int cy, int r, u32 c, u32 a);
+    void ring(int cx, int cy, int r_out, int r_in, u32 c);
+    void image(int ox, int oy, int dw, int dh, const u16* rle, u32 size, int iw, int ih);
+    void clear(u32 c);
+    void swap();
+    u32  lerp(u32 c1, u32 c2, int t, int tmax);
+    u32  rgb565(u16 c);
+}
+
+// ====== TEXT namespace ======
+namespace text {
+    void draw_char(char c, int x, int y, u32 color, int scale = 1);
+    void draw(const char* s, int x, int y, u32 color, int scale = 1);
+    void draw_n(const char* s, int x, int y, u32 color, int max_chars);
+    int  width(const char* s, int scale = 1);
+    void draw_c(const char* s, int x, int y, int w, int h, u32 color, int scale = 1);
+    void draw_int(int v, int x, int y, u32 color, int scale = 1);
+    void draw_int_c(int v, int x, int y, int w, int h, u32 color, int scale = 1);
+    void draw_truncated(const char* s, int x, int y, int w, u32 color);
+}
+
+// ====== MOUSE namespace ======
+namespace mouse {
+    void init();
+    bool feed(u8 b);
+}
+
+// ====== KBD namespace ======
+namespace kbd {
+    void feed(u8 b);
+}
