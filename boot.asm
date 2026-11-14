@@ -7,14 +7,14 @@ align 4
     dd -(0x1BADB002 + 0x00000007) ; checksum
     dd 0, 0, 0, 0, 0
     dd 0                        ; linear graphics
-    dd 480                      ; WIDTH (портрет)
-    dd 800                      ; HEIGHT (портрет)
+    dd 1024                     ; WIDTH (ПК, 4:3)
+    dd 768                      ; HEIGHT
     dd 32                       ; bpp
 
 section .bss
 align 16
 stack_bottom:
-    resb 16384
+    resb 65536
 stack_top:
 
 section .text
