@@ -1,38 +1,35 @@
-CC       = g++ -m32
-AS       = nasm
-LD       = ld -m elf_i386
-CFLAGS   = -ffreestanding -fno-exceptions -fno-rtti -O2 -mno-sse -mno-sse2 -mno-mmx -fno-builtin -fno-stack-protector -fno-pie -fno-pic -fno-tree-loop-distribute-patterns -Wall -Wextra
+CXX      = i686-elf-g++
+AS       = i686-elf-as
+LD       = i686-elf-ld
+CFLAGS   = -m32 -ffreestanding -fno-exceptions -fno-rtti -O2 -Wall -Wextra \
+           -mno-sse -mno-sse2 -mno-mmx -fno-builtin -fno-stack-protector \
+           -fno-pic -std=c++11
+LDFLAGS  = -m elf_i386 -T linker.ld
 
-OBJS     = boot.o kernel.o
+OBJS = boot.o kernel.o gfx.o text.o \
+       drivermouse.o driverkeyboard.o drivernetwork.o installerdriver.o \
+       app_files.o app_browser.o app_clicker.o app_calc.o app_settings.o app_installer.o
 
-all: MinimalZero.iso
+all: imimi.iso
 
-# Явно указываем все 4 картинки, которые нужны для сборки
-img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg: tools/fetch_splash.sh
-	bash tools/fetch_splash.sh
+%.o: %.cpp
+	$(CXX) $(CFLAGS) -c $< -o $@
 
-# images.h зависит от всех 4 картинок
-images.h: img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg tools/img2c.py
-	python3 tools/img2c.py
-
-boot.o: boot.asm
+%.o: %.asm
 	$(AS) -f elf32 $< -o $@
 
-kernel.o: kernel.cpp images.h
-	$(CC) $(CFLAGS) -c $< -o $@
+imimi.bin: $(OBJS) linker.ld
+	$(LD) $(LDFLAGS) -o $@ $(OBJS)
 
-kernel.bin: $(OBJS) linker.ld
-	$(LD) -z noexecstack -T linker.ld -o $@ $(OBJS)
-
-MinimalZero.iso: kernel.bin grub.cfg
+imimi.iso: imimi.bin grub.cfg
 	@rm -rf iso
 	mkdir -p iso/boot/grub
-	cp kernel.bin       iso/boot/
-	cp grub.cfg         iso/boot/grub/
-	grub-mkrescue -o MinimalZero.iso iso 2>/dev/null
+	cp imimi.bin iso/boot/
+	cp grub.cfg iso/boot/grub/
+	grub-mkrescue -o imimi.iso iso 2>/dev/null
 
 clean:
-	rm -f *.o *.bin *.iso images.h *.jpg
+	rm -f *.o *.bin *.iso
 	rm -rf iso
 
 .PHONY: all clean
