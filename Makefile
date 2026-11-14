@@ -1,14 +1,15 @@
-CXX      = i686-elf-g++
-AS       = i686-elf-as
-LD       = i686-elf-ld
+CXX      = g++ -m32
+AS       = nasm
+LD       = ld -m elf_i386
 CFLAGS   = -m32 -ffreestanding -fno-exceptions -fno-rtti -O2 -Wall -Wextra \
            -mno-sse -mno-sse2 -mno-mmx -fno-builtin -fno-stack-protector \
-           -fno-pic -std=c++11
+           -fno-pic -fno-pie -std=c++11
 LDFLAGS  = -m elf_i386 -T linker.ld
 
 OBJS = boot.o kernel.o gfx.o text.o \
        drivermouse.o driverkeyboard.o drivernetwork.o installerdriver.o \
-       app_files.o app_browser.o app_clicker.o app_calc.o app_settings.o app_installer.o
+       app_cliapp.o app_files.o app_browser.o app_installer.o \
+       app_clicker.o app_calc.o app_settings.o
 
 all: imimi.iso
 
