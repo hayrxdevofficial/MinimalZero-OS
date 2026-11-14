@@ -6,10 +6,10 @@ align 4
     dd 0x00000007               ; flags
     dd -(0x1BADB002 + 0x00000007) ; checksum
     dd 0, 0, 0, 0, 0
-    dd 0
-    dd 800
-    dd 600
-    dd 32
+    dd 0                        ; linear graphics
+    dd 480                      ; WIDTH (портрет)
+    dd 800                      ; HEIGHT (портрет)
+    dd 32                       ; bpp
 
 section .bss
 align 16
@@ -20,13 +20,6 @@ stack_top:
 section .text
 global _start
 extern kmain
-
-; --- НОВАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ IDT ---
-global load_idt
-load_idt:
-    mov eax, [esp + 4]  ; берем аргумент из стека (указатель на IDT)
-    lidt [eax]          ; загружаем IDT
-    ret
 
 _start:
     cli
