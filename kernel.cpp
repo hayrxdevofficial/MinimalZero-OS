@@ -1,5 +1,5 @@
 // ============================================================
-//  iMimi OS — PC Edition + REAL TEXT BROWSER
+//  iMimi OS — PC Edition (MinimalZero kernel) + Text Browser
 // ============================================================
 
 typedef unsigned char       u8;
@@ -15,6 +15,7 @@ static inline void outw(u16 p, u16 v) { asm volatile("outw %0,%1" :: "a"(v), "Nd
 extern "C" {
 void* memset(void* d, int c, unsigned int n) { u8* p = (u8*)d; while (n--) *p++ = (u8)c; return d; }
 void* memcpy(void* d, const void* s, unsigned int n) { u8* a = (u8*)d; const u8* b = (const u8*)s; while (n--) *a++ = *b++; return d; }
+void* memmove(void* d, const void* s, unsigned int n) { u8* a = (u8*)d; const u8* b = (const u8*)s; if (a < b) { while (n--) *a++ = *b++; } else { a += n; b += n; while (n--) *--a = *--b; } return d; }
 }
 
 struct multiboot_info {
@@ -28,13 +29,17 @@ struct multiboot_info {
 
 #include "images.h"
 
-// === ГЛОБАЛКИ ===
+struct Img { const u16* rle; u32 size; int w, h; };
+
+// === Время ===
 static u32 tsc16_per_ms = 100000;
 static inline u32 tnow() { u32 lo, hi; asm volatile("rdtsc" : "=a"(lo), "=d"(hi)); return (hi << 28) | (lo >> 4); }
+static inline u32 elapsed_ms(u32 since) { return (tnow() - since) / tsc16_per_ms; }
 static inline u32 ms_now() { return tnow() / tsc16_per_ms; }
 static u8 cmos_read(u8 reg) { outb(0x70, reg); return inb(0x71); }
 static void cmos_write(u8 reg, u8 val) { outb(0x70, (reg | 0x80)); outb(0x71, val); outb(0x70, 0); }
 
+// === Строки ===
 static int slen(const char* s) { int n = 0; while (s[n]) n++; return n; }
 static void scopy(char* d, const char* s, int max) { int i = 0; for (; s[i] && i < max - 1; i++) d[i] = s[i]; d[i] = 0; }
 static bool seq(const char* a, const char* b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
@@ -49,12 +54,24 @@ static int itoa_(int v, char* buf) {
 }
 static int sappend(char* d, int pos, const char* s, int max) { while (*s && pos < max - 1) d[pos++] = *s++; d[pos] = 0; return pos; }
 
-// === ГРАФИКА (сокращена, как в прошлый раз) ===
+// === GFX ===
 #define MAXW 1280
 #define MAXH 1024
 namespace gfx {
-    static u8* fb = nullptr; static u32 W = 1024, H = 768, pitch = 0; static u8 bpp = 32; static bool ok = false; static u32 back[MAXW * MAXH];
-    void init(multiboot_info* mb) { if ((mb->flags & (1u << 12)) && mb->framebuffer_addr) { fb = (u8*)(u32)mb->framebuffer_addr; W = mb->framebuffer_width; H = mb->framebuffer_height; pitch = mb->framebuffer_pitch; bpp = mb->framebuffer_bpp; if (W > MAXW) W = MAXW; if (H > MAXH) H = MAXH; ok = 1; } }
+    static u8* fb = nullptr;
+    static u32 W = 1024, H = 768, pitch = 0;
+    static u8 bpp = 32;
+    static bool ok = false;
+    static u32 back[MAXW * MAXH];
+    void init(multiboot_info* mb) {
+        if ((mb->flags & (1u << 12)) && mb->framebuffer_addr) {
+            fb = (u8*)(u32)mb->framebuffer_addr;
+            W = mb->framebuffer_width; H = mb->framebuffer_height;
+            pitch = mb->framebuffer_pitch; bpp = mb->framebuffer_bpp;
+            if (W > MAXW) W = MAXW; if (H > MAXH) H = MAXH;
+            ok = (bpp == 32 || bpp == 24) && W >= 640 && H >= 480;
+        }
+    }
     static inline void put_pixel(int x, int y, u32 c) { if ((u32)x >= W || (u32)y >= H) return; back[y * W + x] = c; }
     static inline u32 blend(u32 d, u32 s, u32 a) { u32 rb = (((d & 0xFF00FF) * (256 - a) + (s & 0xFF00FF) * a) >> 8) & 0xFF00FF; u32 g = (((d & 0x00FF00) * (256 - a) + (s & 0x00FF00) * a) >> 8) & 0x00FF00; return rb | g; }
     static inline u32 lerp(u32 c1, u32 c2, int t, int tmax) { int r1 = (c1 >> 16) & 255, g1 = (c1 >> 8) & 255, b1 = c1 & 255; int r2 = (c2 >> 16) & 255, g2 = (c2 >> 8) & 255, b2 = c2 & 255; return (((r1 + (r2 - r1) * t / tmax) << 16) | ((g1 + (g2 - g1) * t / tmax) << 8) | (b1 + (b2 - b1) * t / tmax)); }
@@ -65,11 +82,33 @@ namespace gfx {
     void rect_outline(int x, int y, int w, int h, u32 c) { fill_rect(x, y, w, 1, c); fill_rect(x, y + h - 1, w, 1, c); fill_rect(x, y, 1, h, c); fill_rect(x + w - 1, y, 1, h, c); }
     static int isqrt_(int v) { int r = 0; while ((r + 1) * (r + 1) <= v) r++; return r; }
     static int corner_inset(int r, int dy) { int d = 2 * (r - dy) - 1; int v = 4 * r * r - d * d; if (v < 0) v = 0; return r - isqrt_(v) / 2; }
-    void fill_round(int x, int y, int w, int h, int r, u32 c, u32 a = 256) { if (r * 2 > h) r = h / 2; if (r * 2 > w) r = w / 2; for (int j = 0; j < h; j++) { int dy = j < h - 1 - j ? j : h - 1 - j; int ins = dy < r ? corner_inset(r, dy) : 0; if (a >= 256) fill_rect(x + ins, y + j, w - 2 * ins, 1, c); else fill_rect_a(x + ins, y + j, w - 2 * ins, 1, c, a); } }
-    void fill_circle(int cx, int cy, int r, u32 c) { for (int j = -r; j <= r; j++) { int half = isqrt_(r * r - j * j); fill_rect(cx - half, cy + j, half * 2 + 1, 1, c); } }
+    void fill_round(int x, int y, int w, int h, int r, u32 c, u32 a = 256) {
+        if (r * 2 > h) r = h / 2; if (r * 2 > w) r = w / 2;
+        for (int j = 0; j < h; j++) { int dy = j < h - 1 - j ? j : h - 1 - j; int ins = dy < r ? corner_inset(r, dy) : 0; if (a >= 256) fill_rect(x + ins, y + j, w - 2 * ins, 1, c); else fill_rect_a(x + ins, y + j, w - 2 * ins, 1, c, a); }
+    }
+    void fill_circle(int cx, int cy, int r, u32 c, u32 a = 256) {
+        for (int j = -r; j <= r; j++) { int half = isqrt_(r * r - j * j); if (a >= 256) fill_rect(cx - half, cy + j, half * 2 + 1, 1, c); else fill_rect_a(cx - half, cy + j, half * 2 + 1, 1, c, a); }
+    }
     static inline u32 rgb565_to_888(u16 c) { return (((c >> 11) & 0x1F) * 255 / 31 << 16) | (((c >> 5) & 0x3F) * 255 / 63 << 8) | ((c & 0x1F) * 255 / 31); }
-    void draw_image(int ox, int oy, int dw, int dh, const u16* rle, u32 size, int iw, int ih) { u32 idx = 0; int x = 0, y = 0; while (idx < size && y < ih) { u16 hd = rle[idx++]; u32 len = hd & 0x7FFF; bool run = (hd & 0x8000) != 0; u32 col = 0; if (run) col = rgb565_to_888(rle[idx++]); for (u32 i = 0; i < len && y < ih; i++) { if (!run) col = rgb565_to_888(rle[idx++]); int x0 = ox + x * dw / iw, x1 = ox + (x + 1) * dw / iw; int y0 = oy + y * dh / ih, y1 = oy + (y + 1) * dh / ih; fill_rect(x0, y0, x1 > x0 ? x1 - x0 : 1, y1 > y0 ? y1 - y0 : 1, col); if (++x >= iw) { x = 0; y++; } } } }
-    void swap() { if (!fb) return; if (bpp == 32) { u32 p32 = pitch / 4; for (u32 y = 0; y < H; y++) { u32* d = (u32*)fb + y * p32; u32* s = &back[y * W]; for (u32 x = 0; x < W; x++) d[x] = s[x]; } } else { for (u32 y = 0; y < H; y++) { u8* d = fb + y * pitch; u32* s = &back[y * W]; for (u32 x = 0; x < W; x++) { u32 c = s[x]; d[x*3] = c & 255; d[x*3+1] = (c >> 8) & 255; d[x*3+2] = (c >> 16) & 255; } } } }
+    void draw_image(int ox, int oy, int dw, int dh, const u16* rle, u32 size, int iw, int ih) {
+        u32 idx = 0; int x = 0, y = 0;
+        while (idx < size && y < ih) {
+            u16 hd = rle[idx++]; u32 len = hd & 0x7FFF; bool run = (hd & 0x8000) != 0; u32 col = 0;
+            if (run) col = rgb565_to_888(rle[idx++]);
+            for (u32 i = 0; i < len && y < ih; i++) {
+                if (!run) col = rgb565_to_888(rle[idx++]);
+                int x0 = ox + x * dw / iw, x1 = ox + (x + 1) * dw / iw;
+                int y0 = oy + y * dh / ih, y1 = oy + (y + 1) * dh / ih;
+                fill_rect(x0, y0, x1 > x0 ? x1 - x0 : 1, y1 > y0 ? y1 - y0 : 1, col);
+                if (++x >= iw) { x = 0; y++; }
+            }
+        }
+    }
+    void swap() {
+        if (!fb) return;
+        if (bpp == 32) { u32 p32 = pitch / 4; for (u32 y = 0; y < H; y++) { u32* d = (u32*)fb + y * p32; u32* s = &back[y * W]; for (u32 x = 0; x < W; x++) d[x] = s[x]; } }
+        else { for (u32 y = 0; y < H; y++) { u8* d = fb + y * pitch; u32* s = &back[y * W]; for (u32 x = 0; x < W; x++) { u32 c = s[x]; d[x*3] = c & 255; d[x*3+1] = (c >> 8) & 255; d[x*3+2] = (c >> 16) & 255; } } }
+    }
 }
 
 // === ШРИФТ ===
@@ -107,29 +146,30 @@ static const u8 font8x8[95][8] = {
     {0xE0,0x18,0x18,0x1C,0x18,0x18,0xE0,0},{0x76,0xDC,0,0,0,0,0,0}
 };
 static void draw_char(char c, int x, int y, u32 color, int sc = 1) {
-    if (c < 32 || c > 126) c = '?';
-    const u8* g = font8x8[c - 32];
+    if (c < 32 || c > 126) c = '?'; const u8* g = font8x8[c - 32];
     for (int r = 0; r < 8; r++) for (int cl = 0; cl < 8; cl++)
         if (g[r] & (1 << (7 - cl))) { if (sc == 1) gfx::put_pixel(x + cl, y + r, color); else gfx::fill_rect(x + cl * sc, y + r * sc, sc, sc, color); }
 }
 static void draw_text(const char* s, int x, int y, u32 color, int sc = 1) { while (*s) { draw_char(*s++, x, y, color, sc); x += 8 * sc; } }
 static void draw_text_n(const char* s, int x, int y, u32 color, int maxc) { int n = 0; while (*s && n < maxc) { draw_char(*s++, x, y, color); x += 8; n++; } }
-static int  text_w(const char* s, int sc = 1) { return slen(s) * 8 * sc; }
+static int text_w(const char* s, int sc = 1) { return slen(s) * 8 * sc; }
 static void draw_text_c(const char* s, int x, int y, int w, int h, u32 color, int sc = 1) { draw_text(s, x + (w - text_w(s, sc)) / 2, y + (h - 8 * sc) / 2, color, sc); }
 static void draw_int(int v, int x, int y, u32 color, int sc = 1) { char b[16]; itoa_(v, b); draw_text(b, x, y, color, sc); }
 
-// === МЫШЬ, КЛАВИАТУРА, ЗВУК, НАСТРОЙКИ (сокращено) ===
+// === НАСТРОЙКИ ===
 static bool use_kb_mouse = true, use_hayricon = false;
-static int  mouse_speed = 1, volume = 50;
-static int  coins = 0;
+static int mouse_speed = 1, volume = 50;
+static int coins = 0;
 static bool unlocked_teen = false, unlocked_cool = false, has_auto_click = false;
-static int  auto_speed_level = 0, click_power_level = 0;
+static int auto_speed_level = 0, click_power_level = 0;
 static bool dirty = true;
-static int  clock_h = 12, clock_m = 0;
-static int  current_mimi = 0;
-static int  clicker_squish = 0;
-static u32  auto_t = 0;
+static int clock_h = 12, clock_m = 0;
+static int current_mimi = 0;
+static int clicker_squish = 0;
+static u32 auto_t = 0;
+static bool blink_state = false;
 
+// === ЗВУК ===
 static bool snd_on = false; static u32 snd_end = 0;
 static void stop_sound() { outb(0x61, inb(0x61) & 0xFC); snd_on = false; }
 static void beep(u32 freq, u32 ms) {
@@ -140,6 +180,7 @@ static void beep(u32 freq, u32 ms) {
     snd_on = true; snd_end = tnow() + ms * tsc16_per_ms;
 }
 
+// === СОХРАНЕНИЕ ===
 static void save_settings() {
     u8 flags = 2; if (use_kb_mouse) flags |= 4; if (use_hayricon) flags |= 8;
     cmos_write(0x40, flags);
@@ -159,8 +200,10 @@ static void load_settings() {
     if (volume > 100) volume = 50; if (mouse_speed < 1 || mouse_speed > 4) mouse_speed = 1;
     if (auto_speed_level > 20) auto_speed_level = 20; if (click_power_level > 5) click_power_level = 5; if (coins < 0) coins = 0;
 }
-static void reboot() { save_settings(); outb(0x64, 0xFE); while (1) asm volatile("cli; hlt"); }
-static void shutdown() { save_settings(); outw(0x604, 0x2000); while (1) asm volatile("cli; hlt"); }
+struct IdtPtr { u16 limit; u32 base; } __attribute__((packed));
+static void reboot() { save_settings(); for (int i = 0; i < 100000 && (inb(0x64) & 2); i++); outb(0x64, 0xFE); static IdtPtr null_idt = {0, 0}; asm volatile("lidt %0; int3" :: "m"(null_idt)); while (1) asm volatile("cli; hlt"); }
+static void shutdown() { save_settings(); outw(0x604, 0x2000); outw(0xB004, 0x2000); outw(0x4004, 0x3400); while (1) asm volatile("cli; hlt"); }
+
 static void rtc_time(int& h, int& m) {
     for (int i = 0; i < 100000 && (cmos_read(0x0A) & 0x80); i++);
     u8 hh = cmos_read(4), mm = cmos_read(2), b = cmos_read(0x0B);
@@ -170,6 +213,7 @@ static void rtc_time(int& h, int& m) {
     h = hh % 24; m = mm % 60;
 }
 
+// === МЫШЬ ===
 namespace mouse {
     int x = 400, y = 300; u8 btn = 0; u8 pkt[3]; int idx = 0;
     bool ev_press = false, ev_release = false; int px = 0, py = 0;
@@ -195,6 +239,7 @@ namespace mouse {
     }
 }
 
+// === КЛАВИАТУРА ===
 enum { K_UP = 0x101, K_DOWN, K_LEFT, K_RIGHT, K_DEL, K_F1 = 0x110, K_F2, K_F3 };
 static void on_key(int k);
 namespace kbd {
@@ -214,7 +259,7 @@ namespace kbd {
     }
 }
 
-// === ПАЛИТРА И ХЕЛПЕРЫ ===
+// === ПАЛИТРА ===
 #define SCRW ((int)gfx::W)
 #define SCRH ((int)gfx::H)
 #define TASKBAR_H 44
@@ -236,7 +281,7 @@ static void draw_button(const R& r, const char* label, u32 col, u32 tcol, bool e
 }
 static void draw_toggle(int x, int y, bool on) { gfx::fill_round(x, y, 52, 26, 13, on ? C_GREEN : 0xB8BFCC); gfx::fill_circle(on ? x + 39 : x + 13, y + 13, 10, 0xFFFFFF); }
 
-// === ФАЙЛОВАЯ СИСТЕМА (сокращена) ===
+// === ФАЙЛОВАЯ СИСТЕМА ===
 #define MAXN 96
 #define NAMELEN 24
 #define DATALEN 400
@@ -269,7 +314,7 @@ struct Win { bool open, min; int x, y, w, h; };
 static Win wins[NAPPS];
 static int zord[NAPPS];
 static int drag_win = -1, drag_dx = 0, drag_dy = 0;
-static bool power_open = false;
+static bool start_open = false, power_open = false;
 static void init_windows() {
     static const int sz[NAPPS][2] = { {640,460},{540,400},{580,440},{300,410},{460,400},{600,450} };
     for (int i = 0; i < NAPPS; i++) {
@@ -283,205 +328,399 @@ static void front(int a) { int p = 0; for (int i = 0; i < NAPPS; i++) if (zord[i
 static int top_win() { for (int i = NAPPS - 1; i >= 0; i--) { int a = zord[i]; if (wins[a].open && !wins[a].min) return a; } return -1; }
 static int win_at(int x, int y) { for (int i = NAPPS - 1; i >= 0; i--) { int a = zord[i]; Win& w = wins[a]; if (w.open && !w.min && x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h) return a; } return -1; }
 
-// === СЕТЬ ===
-#define COM1 0x3F8
-static void net_init() { outb(COM1 + 1, 0x00); outb(COM1 + 3, 0x80); outb(COM1 + 0, 0x03); outb(COM1 + 1, 0x00); outb(COM1 + 3, 0x03); outb(COM1 + 2, 0xC7); outb(COM1 + 4, 0x0B); }
-static void net_write(u8 b) { int t = 100000; while (!(inb(COM1 + 5) & 0x20) && --t); outb(COM1, b); }
-static int net_read() { if (!(inb(COM1 + 5) & 1)) return -1; return inb(COM1); }
-static void net_get_html(const char* url, char* out, int max_len) {
-    out[0] = 0;
-    // Команда 0x01: "Дай HTML для этого URL"
-    outb(0xE9, 0x01);
-    for (int i = 0; url[i]; i++) outb(0xE9, (u8)url[i]);
-    outb(0xE9, 0);
-    
-    // Читаем ответ
-    int i = 0; u32 timeout = 0;
-    while (i < max_len - 1) {
-        int b = net_read();
-        if (b >= 0) { out[i++] = (char)b; timeout = 0; }
-        else { timeout++; if (timeout > 50000000) break; }
-    }
-    out[i] = 0;
-}
-
 // === БРАУЗЕР ===
 static char web_url[128] = "info.cern.ch";
-static char web_buffer[4096];
+static char web_raw[8192];
+static char web_text[8192];
 static bool web_loading = false;
 static int web_scroll = 0;
 
-static void strip_html(const char* html, char* out, int max_len) {
-    int in_tag = 0, out_i = 0;
-    for (int i = 0; html[i] && out_i < max_len - 1; i++) {
-        if (html[i] == '<') { in_tag = 1; continue; }
-        if (html[i] == '>') { in_tag = 0; continue; }
+static void strip_html(const char* html, char* out, int max) {
+    int in_tag = 0, o = 0;
+    for (int i = 0; html[i] && o < max - 1; i++) {
+        char c = html[i];
+        if (c == '<') { in_tag = 1; continue; }
+        if (c == '>') { in_tag = 0; continue; }
         if (!in_tag) {
-            if (html[i] == '\n' || html[i] == '\r') { if (out_i > 0 && out[out_i-1] != '\n') out[out_i++] = '\n'; }
-            else out[out_i++] = html[i];
+            if (c == '\n' || c == '\r') { if (o > 0 && out[o-1] != '\n') out[o++] = '\n'; }
+            else if (c == '&') {
+                if (html[i+1]=='n'&&html[i+2]=='b'&&html[i+3]=='s'&&html[i+4]==';') { out[o++]=' '; i+=4; }
+                else if (html[i+1]=='a'&&html[i+2]=='m'&&html[i+3]=='p'&&html[i+4]==';') { out[o++]='&'; i+=4; }
+                else if (html[i+1]=='l'&&html[i+2]=='t'&&html[i+3]==';') { out[o++]='<'; i+=3; }
+                else if (html[i+1]=='g'&&html[i+2]=='t'&&html[i+3]==';') { out[o++]='>'; i+=3; }
+                else out[o++] = '&';
+            }
+            else if (c >= 32 || c == '\n') out[o++] = c;
         }
     }
-    out[out_i] = 0;
+    out[o] = 0;
 }
 
 static void browser_draw(int cx, int cy, int cw, int ch) {
     gfx::fill_rect(cx, cy, cw, ch, 0xFFFFFF);
     gfx::fill_rect(cx, cy, cw, 40, 0xE5E7EB);
-    draw_text_n(web_url, cx + 16, cy + 12, 0x1F2937, 50);
-    
-    if (web_loading) {
-        draw_text_c("Loading...", cx, cy + 60, cw, 40, 0x3B82F6, 2);
+    draw_text(web_url, cx + 16, cy + 14, 0x1F2937);
+    if (web_loading) { draw_text_c("Loading...", cx, cy + 60, cw, 40, C_ACC, 2); return; }
+    if (web_text[0] == 0) {
+        draw_text_c("Press ENTER to load the page", cx, cy + 60, cw, ch - 80, C_GRAY);
         return;
     }
-
-    // Парсим HTML (убираем теги)
-    char clean_text[4096];
-    strip_html(web_buffer, clean_text, 4096);
-
-    // Рисуем текст
-    int tx = cx + 16, ty = cy + 50;
-    int line_h = 12;
-    int start_line = web_scroll;
-    int curr_line = 0;
-    
-    for (int i = 0; clean_text[i]; i++) {
-        if (curr_line >= start_line) {
-            if (clean_text[i] == '\n') { tx = cx + 16; ty += line_h; }
-            else {
-                if (tx > cx + cw - 20) { tx = cx + 16; ty += line_h; }
-                if (ty > cy + ch - 20) break; // Конец экрана
-                draw_char(clean_text[i], tx, ty, 0x1F2937, 1);
-                tx += 8;
-            }
-        }
-        if (clean_text[i] == '\n') curr_line++;
+    int tx = cx + 16, ty = cy + 56, line = 0;
+    int max_lines = (ch - 70) / 12;
+    for (int i = 0; web_text[i]; i++) {
+        if (line < web_scroll) { if (web_text[i] == '\n') line++; continue; }
+        if (line - web_scroll >= max_lines) break;
+        if (web_text[i] == '\n') { tx = cx + 16; ty += 12; line++; }
+        else { if (tx > cx + cw - 20) { tx = cx + 16; ty += 12; line++; } if (line - web_scroll >= max_lines) break; draw_char(web_text[i], tx, ty, C_TEXT); tx += 8; }
     }
+}
+
+static void browser_load() {
+    web_loading = true;
+    web_text[0] = 0; web_raw[0] = 0;
+    outb(0xE9, 0x01);
+    for (int i = 0; web_url[i]; i++) outb(0xE9, (u8)web_url[i]);
+    outb(0xE9, 0);
+    int i = 0; int timeout = 0;
+    while (i < (int)sizeof(web_raw) - 1) {
+        if ((inb(0x3F8 + 5) & 1) == 0) { if (++timeout > 30000000) break; continue; }
+        int b = inb(0x3F8);
+        if (b == 0) break;
+        web_raw[i++] = (char)b; timeout = 0;
+    }
+    web_raw[i] = 0;
+    strip_html(web_raw, web_text, sizeof(web_text));
+    web_loading = false;
+    web_scroll = 0;
 }
 
 static void browser_click(int px, int py, int cx, int cy, int cw, int ch) {
-    (void)cw; (void)ch;
-    R b1 = { cx + 16, cy + 60, 100, 30 }; // Кнопка "Загрузить"
-    // В реальности тут нужна кнопка "Go", а пока просто клик по экрану запускает загрузку
-    (void)b1;
-    (void)px; (void)py;
+    (void)px; (void)py; (void)cx; (void)cy; (void)cw; (void)ch;
 }
 
-// Запускаем загрузку по нажатию Enter в браузере
-static void browser_load() {
-    web_loading = true;
-    net_get_html(web_url, web_buffer, 4096);
-    web_loading = false;
+// === APP FILES ===
+static void files_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, C_BG); gfx::fill_rect(cx, cy, 130, ch, C_PANEL);
+    static const char* side_names[5] = { "Home", "Docs", "Pics", "Music", "Trash" };
+    int side_ids[5] = { 0, fs_docs, fs_pics, fs_music, -2 };
+    for (int i = 0; i < 5; i++) { R r = { cx, cy + 10 + i * 34, 130, 32 }; bool cur = (i < 4 && fm_dir == side_ids[i]); if (cur) gfx::fill_round(r.x + 6, r.y, r.w - 12, r.h, 6, C_ACC); else if (hov(r)) gfx::fill_round(r.x + 6, r.y, r.w - 12, r.h, 6, 0xD2DAEA); draw_text(side_names[i], r.x + 16, r.y + 12, cur ? 0xFFFFFF : C_TEXT); }
+    R b0 = { cx + 138, cy + 6, 80, 28 }; R b1 = { cx + 224, cy + 6, 100, 28 }; R b2 = { cx + 330, cy + 6, 80, 28 };
+    draw_button(b0, "< Up", C_ACC, 0xFFFFFF, fm_dir != 0); draw_button(b1, "New File", C_ACC, 0xFFFFFF); draw_button(b2, "Delete", C_RED, 0xFFFFFF, fm_sel > 0);
+    char path[96]; fs_path(fm_dir, path, 96); gfx::fill_rect(cx + 130, cy + 40, cw - 130, 24, 0xFFFFFF); draw_text("Path: ", cx + 138, cy + 48, C_GRAY); draw_text_n(path, cx + 186, cy + 48, C_TEXT, 50);
+    int list[MAXN]; int n = fs_list(fm_dir, list, MAXN); int rows = (ch - 66) / 30;
+    for (int i = 0; i < rows && i + fm_scroll < n; i++) { int idx = list[i + fm_scroll]; R r = { cx + 130, cy + 66 + i * 30, cw - 130, 30 }; if (idx == fm_sel) gfx::fill_rect(r.x, r.y, r.w, r.h, 0xCFE0FF); else if (hov(r)) gfx::fill_rect(r.x, r.y, r.w, r.h, 0xE8EEFA); if (fs[idx].dir) gfx::fill_round(r.x + 12, r.y + 6, 20, 16, 3, 0xF5C542); else { gfx::fill_round(r.x + 14, r.y + 5, 17, 21, 2, 0xFFFFFF); gfx::rect_outline(r.x + 14, r.y + 5, 17, 21, 0x9AA3B2); } draw_text_n(fs[idx].name, r.x + 46, r.y + 11, C_TEXT, 30); }
+    if (n == 0) draw_text("(empty)", cx + 150, cy + 90, C_GRAY);
+}
+static void files_click(int px, int py, int cx, int cy, int cw, int ch) {
+    int side_ids[5] = { 0, fs_docs, fs_pics, fs_music, -2 };
+    for (int i = 0; i < 5; i++) { R r = { cx, cy + 10 + i * 34, 130, 32 }; if (hit(r, px, py)) { if (i == 4) { wins[APP_TRASH].open = true; wins[APP_TRASH].min = false; front(APP_TRASH); return; } if (side_ids[i] >= 0) { fm_dir = side_ids[i]; fm_sel = -1; fm_scroll = 0; } return; } }
+    R b0 = { cx + 138, cy + 6, 80, 28 }; R b1 = { cx + 224, cy + 6, 100, 28 }; R b2 = { cx + 330, cy + 6, 80, 28 };
+    if (hit(b0, px, py) && fm_dir != 0) { fm_sel = fm_dir; fm_dir = fs[fm_dir].parent; fm_scroll = 0; return; }
+    if (hit(b1, px, py)) { int n = fs_new(fm_dir, "new.txt", false); fs_set_text(n, "New file"); return; }
+    if (hit(b2, px, py) && fm_sel > 0) { fs[fm_sel].trashed = true; fm_sel = -1; return; }
+    int list[MAXN]; int n = fs_list(fm_dir, list, MAXN); int rows = (ch - 66) / 30;
+    for (int i = 0; i < rows && i + fm_scroll < n; i++) { R r = { cx + 130, cy + 66 + i * 30, cw - 130, 30 }; if (hit(r, px, py)) { int idx = list[i + fm_scroll]; fm_sel = idx; if (fs[idx].dir) { fm_dir = idx; fm_sel = -1; fm_scroll = 0; } return; } }
+    fm_sel = -1;
 }
 
-// === ОТРИСОВКА ПРИЛОЖЕНИЙ ===
+// === APP TRASH ===
+static void trash_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, C_BG);
+    int list[MAXN]; int n = fs_trash_list(list, MAXN);
+    if (tr_sel > 0 && (!fs[tr_sel].used || !fs[tr_sel].trashed)) tr_sel = -1;
+    R b0 = { cx + 12, cy + 8, 110, 28 }; R b1 = { cx + 130, cy + 8, 150, 28 }; R b2 = { cx + 288, cy + 8, 130, 28 };
+    draw_button(b0, "Restore", C_GREEN, 0xFFFFFF, tr_sel > 0); draw_button(b1, "Delete forever", C_RED, 0xFFFFFF, tr_sel > 0); draw_button(b2, "Empty Trash", 0x6B7280, 0xFFFFFF, n > 0);
+    char st[32]; int p = itoa_(n, st); sappend(st, p, " items in Trash", 32); draw_text(st, cx + 12, cy + 48, C_GRAY);
+    int rows = (ch - 70) / 30;
+    for (int i = 0; i < rows && i < n; i++) { int idx = list[i]; R r = { cx, cy + 66 + i * 30, cw, 30 }; if (idx == tr_sel) gfx::fill_rect(r.x, r.y, r.w, r.h, 0xCFE0FF); else if (hov(r)) gfx::fill_rect(r.x, r.y, r.w, r.h, 0xE8EEFA); draw_text_n(fs[idx].name, r.x + 12, r.y + 11, C_TEXT, 30); }
+    if (n == 0) draw_text_c("Trash is empty", cx, cy + 80, cw, ch - 80, C_GRAY);
+}
+static void trash_click(int px, int py, int cx, int cy, int cw, int ch) {
+    int list[MAXN]; int n = fs_trash_list(list, MAXN);
+    R b0 = { cx + 12, cy + 8, 110, 28 }; R b1 = { cx + 130, cy + 8, 150, 28 }; R b2 = { cx + 288, cy + 8, 130, 28 };
+    if (hit(b0, px, py) && tr_sel > 0) { fs[tr_sel].trashed = false; if (!fs_reachable(fs[tr_sel].parent)) fs[tr_sel].parent = 0; tr_sel = -1; return; }
+    if (hit(b1, px, py) && tr_sel > 0) { fs_destroy(tr_sel); tr_sel = -1; return; }
+    if (hit(b2, px, py) && n > 0) { for (int i = 0; i < n; i++) fs_destroy(list[i]); tr_sel = -1; return; }
+    int rows = (ch - 70) / 30;
+    for (int i = 0; i < rows && i < n; i++) { R r = { cx, cy + 66 + i * 30, cw, 30 }; if (hit(r, px, py)) { tr_sel = list[i]; return; } }
+    tr_sel = -1;
+}
+
+// === APP CLICKER ===
+static int click_gain() { return 1 + click_power_level; }
+static int speed_cost() { return 20 + auto_speed_level * 10; }
+static int power_cost() { return 30 * (click_power_level + 1); }
+static Img skin_img(int i) {
+    if (i == 1) return { img_adult_rle, img_adult_size, img_adult_w, img_adult_h };
+    if (i == 2) return { img_cool_rle, img_cool_size, img_cool_w, img_cool_h };
+    return { img_base_rle, img_base_size, img_base_w, img_base_h };
+}
+static void clicker_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_gradient(cx, cy, cw, ch, 0xFFFFFF, 0xDCE7FB);
+    gfx::fill_circle(cx + 26, cy + 26, 10, 0xFFC93C); gfx::fill_circle(cx + 26, cy + 26, 6, 0xFFE08A);
+    draw_int(coins, cx + 46, cy + 18, 0xB77900, 2);
+    char g[24]; int p = sappend(g, 0, "+", 24); char t[8]; itoa_(click_gain(), t); p = sappend(g, p, t, 24); sappend(g, p, " / click", 24); draw_text(g, cx + 16, cy + 48, C_GRAY);
+    Img im = skin_img(current_mimi);
+    int sq = clicker_squish; int dh = 260 - sq, dw = im.w * dh / im.h;
+    if (dw > 280) { dw = 280; dh = im.h * dw / im.w - sq; }
+    int img_x = cx + 150 - dw / 2; int img_y = cy + ch - 60 - dh;
+    gfx::fill_round(cx + 60, cy + ch - 70, 180, 16, 8, 0x000000, 40);
+    gfx::draw_image(img_x, img_y, dw, dh, im.rle, im.size, im.w, im.h);
+    int sx = cx + cw - 260; int sy = cy + 16;
+    draw_text("SKINS", sx, sy, C_TEXT); sy += 20;
+    struct Sk { const char* n; int id; int cost; bool owned; };
+    Sk skins[3] = { {"Mini",0,0,true}, {"Teen",1,10,unlocked_teen}, {"Cool",2,25,unlocked_cool} };
+    for (int i = 0; i < 3; i++) { bool sel = (current_mimi == skins[i].id); u32 bg = sel ? C_GREEN : (skins[i].owned ? 0xD1FAE5 : (coins >= skins[i].cost ? C_ACC : 0xD1D5DB)); R r = { sx, sy, 240, 32 }; gfx::fill_round(r.x, r.y, r.w, r.h, 6, bg); draw_text(skins[i].n, sx + 10, sy + 10, 0xFFFFFF); if (skins[i].owned) { if (sel) draw_text("ON", sx + 200, sy + 10, 0xFFFFFF); } else { char c[8]; itoa_(skins[i].cost, c); draw_text(c, sx + 200, sy + 10, 0xFFFFFF); } sy += 38; }
+    sy += 10; draw_text("UPGRADES", sx, sy, C_TEXT); sy += 20;
+    R ar = { sx, sy, 240, 32 }; gfx::fill_round(ar.x, ar.y, ar.w, ar.h, 6, has_auto_click ? 0xD1FAE5 : (coins >= 15 ? C_ACC : 0xD1D5DB)); draw_text("Auto-click", sx + 10, sy + 10, 0xFFFFFF); if (has_auto_click) draw_text("OWNED", sx + 180, sy + 10, 0x166534); else draw_text("15", sx + 200, sy + 10, 0xFFFFFF); sy += 38;
+    R sr = { sx, sy, 240, 32 }; gfx::fill_round(sr.x, sr.y, sr.w, sr.h, 6, has_auto_click && coins >= speed_cost() ? C_ACC : 0xD1D5DB); draw_text("Speed +1", sx + 10, sy + 10, 0xFFFFFF); { char c[8]; itoa_(speed_cost(), c); draw_text(c, sx + 200, sy + 10, 0xFFFFFF); } sy += 38;
+    R pr = { sx, sy, 240, 32 }; gfx::fill_round(pr.x, pr.y, pr.w, pr.h, 6, coins >= power_cost() ? C_ACC : 0xD1D5DB); draw_text("Power +1", sx + 10, sy + 10, 0xFFFFFF); { char c[8]; itoa_(power_cost(), c); draw_text(c, sx + 200, sy + 10, 0xFFFFFF); }
+}
+static void clicker_click(int px, int py, int cx, int cy, int cw, int ch) {
+    Img im = skin_img(current_mimi);
+    int dh = 260, dw = im.w * dh / im.h; if (dw > 280) { dw = 280; dh = im.h * dw / im.w; }
+    int img_x = cx + 150 - dw / 2; int img_y = cy + ch - 60 - dh;
+    if (px >= img_x && px <= img_x + dw && py >= img_y && py <= img_y + dh) { coins += click_gain(); clicker_squish = 10; beep(1200, 30); save_settings(); return; }
+    int sx = cx + cw - 260; int sy = cy + 16 + 20;
+    for (int i = 0; i < 3; i++) { R r = { sx, sy, 240, 32 }; if (hit(r, px, py)) { int cost = (i == 1) ? 10 : (i == 2) ? 25 : 0; bool owned = (i == 0) || (i == 1 && unlocked_teen) || (i == 2 && unlocked_cool); if (owned) { current_mimi = i; beep(1000, 30); } else if (coins >= cost) { coins -= cost; if (i == 1) unlocked_teen = true; if (i == 2) unlocked_cool = true; current_mimi = i; beep(1500, 80); } save_settings(); return; } sy += 38; }
+    sy += 30;
+    R ar = { sx, sy, 240, 32 }; if (hit(ar, px, py)) { if (!has_auto_click && coins >= 15) { coins -= 15; has_auto_click = true; auto_t = tnow(); beep(1500, 80); save_settings(); } return; } sy += 38;
+    R sr = { sx, sy, 240, 32 }; if (hit(sr, px, py)) { if (has_auto_click && coins >= speed_cost()) { coins -= speed_cost(); auto_speed_level++; beep(1500, 80); save_settings(); } return; } sy += 38;
+    R pr = { sx, sy, 240, 32 }; if (hit(pr, px, py)) { if (coins >= power_cost()) { coins -= power_cost(); click_power_level++; beep(1500, 80); save_settings(); } return; }
+}
+
+// === APP CALC ===
+static int calc_disp = 0, calc_stored = 0, calc_op = 0; static bool calc_new = true;
+static void calc_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, 0x1B1F2B);
+    gfx::fill_round(cx + 12, cy + 12, cw - 24, 70, 8, 0x0F1218);
+    char b[16]; itoa_(calc_disp, b); draw_text(b, cx + cw - 24 - text_w(b, 3), cy + 38, 0xE5E7EB, 3);
+    static const char* L[16] = { "7","8","9","/","4","5","6","*","1","2","3","-","C","0","=","+" };
+    int pad = 8; int bw = (cw - pad * 5) / 4; int bh = (ch - 100 - pad * 6) / 4;
+    for (int i = 0; i < 16; i++) { int r = i / 4, c = i % 4; int bx = cx + pad + c * (bw + pad); int by = cy + 100 + pad + r * (bh + pad); R rr = { bx, by, bw, bh }; u32 col = 0x3A4154; if (i % 4 == 3) col = 0xF59E0B; if (i == 12) col = C_RED; if (i == 14) col = C_GREEN; if (hov(rr)) col = gfx::lerp(col, 0xFFFFFF, 1, 5); gfx::fill_round(bx, by, bw, bh, 8, col); draw_text_c(L[i], bx, by, bw, bh, 0xFFFFFF, 2); }
+}
+static void calc_click(int px, int py, int cx, int cy, int cw, int ch) {
+    int pad = 8; int bw = (cw - pad * 5) / 4; int bh = (ch - 100 - pad * 6) / 4;
+    for (int i = 0; i < 16; i++) { int r = i / 4, c = i % 4; int bx = cx + pad + c * (bw + pad); int by = cy + 100 + pad + r * (bh + pad); R rr = { bx, by, bw, bh }; if (!hit(rr, px, py)) continue; beep(1500, 20);
+        static const int digits[16] = { 7,8,9,-1,4,5,6,-1,1,2,3,-1,-1,0,-1,-1 };
+        if (i == 12) { calc_disp = 0; calc_stored = 0; calc_op = 0; }
+        else if (i == 14) { if (calc_op == 1) calc_disp = calc_stored + calc_disp; else if (calc_op == 2) calc_disp = calc_stored - calc_disp; else if (calc_op == 3) calc_disp = calc_stored * calc_disp; else if (calc_op == 4 && calc_disp != 0) calc_disp = calc_stored / calc_disp; calc_op = 0; calc_new = true; }
+        else if (i == 3 || i == 7 || i == 11 || i == 15) { calc_stored = calc_disp; calc_op = (i == 3) ? 4 : (i == 7) ? 3 : (i == 11) ? 2 : 1; calc_new = true; }
+        else { int d = digits[i]; if (d >= 0) { if (calc_new) { calc_disp = d; calc_new = false; } else calc_disp = calc_disp * 10 + d; } }
+        return; }
+}
+
+// === APP SETTINGS ===
+static void settings_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, C_BG); int y = cy + 16;
+    gfx::fill_round(cx + 12, y, cw - 24, 50, 8, 0xFFFFFF); draw_text("Keyboard Mouse", cx + 26, y + 11, C_TEXT); draw_text("Arrows / WASD", cx + 26, y + 29, C_GRAY); draw_toggle(cx + cw - 80, y + 12, use_kb_mouse); y += 58;
+    gfx::fill_round(cx + 12, y, cw - 24, 50, 8, 0xFFFFFF); draw_text("HayrICons", cx + 26, y + 11, C_TEXT); draw_text("Alternative icon", cx + 26, y + 29, C_GRAY); draw_toggle(cx + cw - 80, y + 12, use_hayricon); y += 58;
+    gfx::fill_round(cx + 12, y, cw - 24, 50, 8, 0xFFFFFF); draw_text("Volume", cx + 26, y + 11, C_TEXT); draw_text("0 - 100", cx + 26, y + 29, C_GRAY);
+    { R m = { cx + cw - 140, y + 10, 30, 30 }; R p = { cx + cw - 70, y + 10, 30, 30 }; draw_button(m, "-", C_ACC, 0xFFFFFF); draw_button(p, "+", C_ACC, 0xFFFFFF); char vb[8]; itoa_(volume, vb); draw_text_c(vb, cx + cw - 110, y + 14, 40, 22, C_TEXT); } y += 58;
+    gfx::fill_round(cx + 12, y, cw - 24, 50, 8, 0xFFFFFF); draw_text("Mouse speed", cx + 26, y + 11, C_TEXT); draw_text("1=slow 4=fast", cx + 26, y + 29, C_GRAY);
+    { R m = { cx + cw - 140, y + 10, 30, 30 }; R p = { cx + cw - 70, y + 10, 30, 30 }; draw_button(m, "-", C_ACC, 0xFFFFFF); draw_button(p, "+", C_ACC, 0xFFFFFF); char mb[8]; itoa_(mouse_speed, mb); draw_text_c(mb, cx + cw - 110, y + 14, 40, 22, C_TEXT); }
+    draw_text("Saved automatically", cx + 16, cy + ch - 20, C_GRAY);
+}
+static void settings_click(int px, int py, int cx, int cy, int cw, int ch) {
+    (void)ch; int y = cy + 16;
+    if (hit({ cx + 12, y, cw - 24, 50 }, px, py)) { use_kb_mouse = !use_kb_mouse; save_settings(); return; } y += 58;
+    if (hit({ cx + 12, y, cw - 24, 50 }, px, py)) { use_hayricon = !use_hayricon; save_settings(); return; } y += 58;
+    if (hit({ cx + cw - 140, y + 10, 30, 30 }, px, py)) { if (volume >= 10) volume -= 10; save_settings(); return; }
+    if (hit({ cx + cw - 70, y + 10, 30, 30 }, px, py)) { if (volume <= 90) volume += 10; save_settings(); return; } y += 58;
+    if (hit({ cx + cw - 140, y + 10, 30, 30 }, px, py)) { if (mouse_speed > 1) mouse_speed--; save_settings(); return; }
+    if (hit({ cx + cw - 70, y + 10, 30, 30 }, px, py)) { if (mouse_speed < 4) mouse_speed++; save_settings(); return; }
+}
+
+// === APP DISPATCH ===
+static void app_draw(int a, int cx, int cy, int cw, int ch) {
+    switch (a) { case APP_FILES: files_draw(cx, cy, cw, ch); break; case APP_TRASH: trash_draw(cx, cy, cw, ch); break; case APP_CLICK: clicker_draw(cx, cy, cw, ch); break; case APP_CALC: calc_draw(cx, cy, cw, ch); break; case APP_SET: settings_draw(cx, cy, cw, ch); break; case APP_BROWSER: browser_draw(cx, cy, cw, ch); break; }
+}
+static void app_click(int a, int px, int py, int cx, int cy, int cw, int ch) {
+    switch (a) { case APP_FILES: files_click(px, py, cx, cy, cw, ch); break; case APP_TRASH: trash_click(px, py, cx, cy, cw, ch); break; case APP_CLICK: clicker_click(px, py, cx, cy, cw, ch); break; case APP_CALC: calc_click(px, py, cx, cy, cw, ch); break; case APP_SET: settings_click(px, py, cx, cy, cw, ch); break; case APP_BROWSER: browser_click(px, py, cx, cy, cw, ch); break; }
+}
+
+// === ICONS ===
 static void draw_app_icon(int a, int x, int y) {
-    if (a == APP_FILES) { gfx::fill_round(x + 4, y + 8, 24, 12, 3, 0xE0A800); gfx::fill_round(x + 2, y + 15, 52, 38, 6, 0xF5C542); }
-    else if (a == APP_TRASH) { gfx::fill_round(x + 11, y + 18, 34, 36, 5, 0xB8C0CC); gfx::fill_rect(x + 22, y + 6, 12, 5, 0x9AA3B2); }
-    else if (a == APP_CLICK) { gfx::fill_round(x, y, 56, 56, 12, 0xFFFFFF); int dh = 52, dw = img_base_w * dh / img_base_h; gfx::draw_image(x + 28 - dw/2, y + 28 - dh/2, dw, dh, img_base_rle, img_base_size, img_base_w, img_base_h); }
-    else if (a == APP_CALC) { gfx::fill_round(x + 6, y + 1, 44, 54, 7, 0x2D3340); gfx::fill_round(x + 11, y + 6, 34, 14, 3, 0x9BE7A7); }
-    else if (a == APP_BROWSER) { gfx::fill_circle(x + 28, y + 28, 26, 0x3B82F6); gfx::fill_circle(x + 28, y + 28, 22, 0x60A5FA); gfx::fill_rect(x + 27, y + 6, 2, 44, 0xFFFFFF); gfx::fill_rect(x + 6, y + 27, 44, 2, 0xFFFFFF); }
-    else { gfx::fill_circle(x + 28, y + 28, 20, 0xAEB6C4); }
+    if (a == APP_FILES) { gfx::fill_round(x + 4, y + 8, 24, 12, 3, 0xE0A800); gfx::fill_round(x + 2, y + 15, 52, 38, 6, 0xF5C542); gfx::fill_round(x + 2, y + 24, 52, 29, 6, 0xFFD75E); }
+    else if (a == APP_TRASH) { bool full = fs_trash_count() > 0; if (full) { gfx::fill_rect(x + 14, y + 0, 16, 12, 0xFFFFFF); gfx::fill_rect(x + 28, y + 2, 14, 11, 0xFDE68A); } gfx::fill_round(x + 8, y + 10, 40, 7, 2, 0x9AA3B2); gfx::fill_rect(x + 22, y + 6, 12, 5, 0x9AA3B2); gfx::fill_round(x + 11, y + 18, 34, 36, 5, 0xB8C0CC); for (int k = 0; k < 3; k++) gfx::fill_rect(x + 19 + k * 8, y + 25, 3, 22, 0x7C8696); }
+    else if (a == APP_CLICK) { Img im = use_hayricon ? Img{img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h} : Img{img_base_rle, img_base_size, img_base_w, img_base_h}; int dh = 52, dw = im.w * dh / im.h; if (dw > 52) { dw = 52; dh = im.h * dw / im.w; } gfx::fill_round(x, y, 56, 56, 12, 0xFFFFFF); gfx::draw_image(x + 28 - dw / 2, y + 28 - dh / 2, dw, dh, im.rle, im.size, im.w, im.h); }
+    else if (a == APP_CALC) { gfx::fill_round(x + 6, y + 1, 44, 54, 7, 0x2D3340); gfx::fill_round(x + 11, y + 6, 34, 14, 3, 0x9BE7A7); for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) gfx::fill_round(x + 11 + c * 9, y + 25 + r * 7, 7, 5, 1, c == 3 ? 0xF59E0B : 0xE5E7EB); }
+    else if (a == APP_BROWSER) { gfx::fill_circle(x + 28, y + 28, 26, 0x3B82F6); gfx::fill_circle(x + 28, y + 28, 22, 0x60A5FA); gfx::fill_rect(x + 27, y + 6, 2, 44, 0xFFFFFF); gfx::fill_rect(x + 6, y + 27, 44, 2, 0xFFFFFF); gfx::fill_circle(x + 28, y + 28, 10, 0xFFFFFF); }
+    else { int cx = x + 28, cy = y + 28; static const int dx[8] = { 22, 15, 0, -15, -22, -15, 0, 15 }, dy[8] = { 0, 15, 22, 15, 0, -15, -22, -15 }; for (int k = 0; k < 8; k++) gfx::fill_round(cx + dx[k] - 5, cy + dy[k] - 5, 10, 10, 3, 0xAEB6C4); gfx::fill_circle(cx, cy, 18, 0xAEB6C4); gfx::fill_circle(cx, cy, 8, 0x4B5563); }
 }
 
 static const int desk_apps[6] = { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER };
 static R desk_icon(int i) { return { 18, 18 + i * 82, 88, 78 }; }
-
-static void app_draw(int a, int cx, int cy, int cw, int ch) {
-    if (a == APP_FILES) {
-        gfx::fill_rect(cx, cy, cw, ch, C_BG);
-        int n = fs_list(fm_dir, (int*)web_buffer, 10); // Используем буфер для демо
-        draw_text("Files (Demo)", cx + 20, cy + 20, C_TEXT);
-    } else if (a == APP_CLICK) {
-        gfx::fill_gradient(cx, cy, cw, ch, 0xFFFFFF, 0xDCE7FB);
-        draw_int(coins, cx + 20, cy + 20, 0xB77900, 3);
-        int dh = 200, dw = img_base_w * dh / img_base_h;
-        gfx::draw_image(cx + cw/2 - dw/2, cy + ch/2 - dh/2, dw, dh, img_base_rle, img_base_size, img_base_w, img_base_h);
-    } else if (a == APP_CALC) {
-        gfx::fill_rect(cx, cy, cw, ch, 0x1B1F2B);
-        draw_int(coins, cx + 20, cy + 20, 0xFFFFFF, 2);
-    } else if (a == APP_BROWSER) {
-        browser_draw(cx, cy, cw, ch);
-    } else {
-        gfx::fill_rect(cx, cy, cw, ch, C_BG);
-        draw_text(app_title[a], cx + 20, cy + 20, C_TEXT);
-    }
-}
-
-static void app_click(int a, int px, int py, int cx, int cy, int cw, int ch) {
-    if (a == APP_CLICK) {
-        int dh = 200, dw = img_base_w * dh / img_base_h;
-        int ix = cx + cw/2 - dw/2, iy = cy + ch/2 - dh/2;
-        if (px >= ix && px <= ix+dw && py >= iy && py <= iy+dh) { coins++; clicker_squish = 10; beep(1200, 20); }
-    } else if (a == APP_BROWSER) {
-        browser_click(px, py, cx, cy, cw, ch);
-    }
-}
+static int desk_sel = -1;
 
 // === RENDER ===
-static void draw_wallpaper() { gfx::fill_gradient(0, 0, SCRW, SCRH, 0x0E1A3F, 0x4A2A6B); gfx::fill_circle(SCRW * 3 / 4, SCRH / 3, 200, 0x5B7CFA); }
-static void render() {
-    draw_wallpaper();
-    for (int i = 0; i < 6; i++) {
-        R r = desk_icon(i);
-        if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 50);
-        draw_app_icon(desk_apps[i], r.x + 16, r.y + 6);
-        const char* t = app_title[desk_apps[i]];
-        draw_text(t, r.x + (r.w - text_w(t))/2, r.y + 70, 0xFFFFFF);
-    }
-    for (int i = 0; i < NAPPS; i++) {
-        int a = zord[i]; if (wins[a].open && !wins[a].min) {
-            Win& w = wins[a]; bool active = (top_win() == a);
-            gfx::fill_round(w.x + 4, w.y + 6, w.w, w.h, 10, 0x000000, 70);
-            gfx::fill_round(w.x, w.y, w.w, TITLEH + 12, 10, active ? 0x2D4A9A : 0x353A50);
-            draw_text(app_title[a], w.x + 14, w.y + 11, 0xFFFFFF);
-            app_draw(a, w.x, w.y + TITLEH, w.w, w.h - TITLEH);
+static void draw_wallpaper() { gfx::fill_gradient(0, 0, SCRW, SCRH, 0x0E1A3F, 0x4A2A6B); gfx::fill_circle(SCRW * 3 / 4, SCRH / 3, SCRH / 3, 0x5B7CFA, 40); gfx::fill_circle(SCRW / 3, SCRH * 3 / 4, SCRH / 4, 0xFF6FB5, 34); }
+static void draw_desktop_icons() {
+    for (int i = 0; i < 6; i++) { R r = desk_icon(i); if (desk_sel == i) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 70); else if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 34); draw_app_icon(desk_apps[i], r.x + 16, r.y + 6); const char* t = app_title[desk_apps[i]]; int tw = text_w(t); if (tw > r.w) tw = r.w; draw_text(t, r.x + (r.w - text_w(t)) / 2 + 1, r.y + 71, 0x000000); draw_text(t, r.x + (r.w - text_w(t)) / 2, r.y + 70, 0xFFFFFF); }
+}
+static R win_close_btn(const Win& w) { return { w.x + w.w - 30, w.y + 4, 24, 22 }; }
+static R win_min_btn(const Win& w) { return { w.x + w.w - 58, w.y + 4, 24, 22 }; }
+static void draw_window(int a) {
+    Win& w = wins[a]; bool active = (top_win() == a);
+    gfx::fill_round(w.x + 4, w.y + 6, w.w, w.h, 10, 0x000000, 70);
+    gfx::fill_round(w.x, w.y, w.w, TITLEH + 12, 10, active ? 0x2D4A9A : 0x353A50);
+    gfx::fill_gradient(w.x + 4, w.y + 2, w.w - 8, TITLEH / 2, active ? 0x3C5DB8 : 0x40465F, active ? 0x2D4A9A : 0x353A50);
+    draw_text(app_title[a], w.x + 14, w.y + 11, 0xFFFFFF);
+    R m = win_min_btn(w), c = win_close_btn(w);
+    gfx::fill_round(m.x, m.y, m.w, m.h, 5, hov(m) ? 0x6B7BB5 : 0x4A5A94); draw_text_c("-", m.x, m.y, m.w, m.h, 0xFFFFFF);
+    gfx::fill_round(c.x, c.y, c.w, c.h, 5, hov(c) ? C_RED : 0x4A5A94); draw_text_c("x", c.x, c.y, c.w, c.h, 0xFFFFFF);
+    app_draw(a, w.x, w.y + TITLEH, w.w, w.h - TITLEH);
+    gfx::rect_outline(w.x, w.y + TITLEH, w.w, w.h - TITLEH, active ? 0x2D4A9A : 0x353A50);
+}
+static R start_btn() { return { 6, SCRH - TASKBAR_H + 6, 96, 32 }; }
+static R taskbar_btn(int slot) { return { 112 + slot * 148, SCRH - TASKBAR_H + 6, 142, 32 }; }
+static void draw_taskbar() {
+    int ty = SCRH - TASKBAR_H; gfx::fill_rect_a(0, ty, SCRW, TASKBAR_H, 0x10142A, 215); gfx::fill_rect(0, ty, SCRW, 1, 0x4C5C9A);
+    R s = start_btn(); gfx::fill_round(s.x, s.y, s.w, s.h, 8, start_open ? C_ACC_D : (hov(s) ? 0x5B9BFF : C_ACC)); draw_text_c("iMimi", s.x, s.y, s.w, s.h, 0xFFFFFF);
+    int slot = 0; int tw = top_win();
+    for (int a = 0; a < NAPPS; a++) if (wins[a].open) { R r = taskbar_btn(slot++); bool act = (tw == a); gfx::fill_round(r.x, r.y, r.w, r.h, 8, act ? 0x3D5CB8 : (hov(r) ? 0x2B3566 : 0x1F2748)); if (act) gfx::fill_rect(r.x + 10, r.y + r.h - 3, r.w - 20, 2, 0x8FB4FF); draw_text_n(app_title[a], r.x + 10, r.y + 12, wins[a].min ? 0x8892B8 : 0xFFFFFF, 16); }
+    char c[8]; c[0] = '0' + clock_h / 10; c[1] = '0' + clock_h % 10; c[2] = ':'; c[3] = '0' + clock_m / 10; c[4] = '0' + clock_m % 10; c[5] = 0; draw_text(c, SCRW - 16 - text_w(c, 2), ty + 14, 0xFFFFFF, 2);
+    char v[16]; int p = sappend(v, 0, "VOL ", 16); char t[8]; itoa_(volume, t); sappend(v, p, t, 16); draw_text(v, SCRW - 16 - text_w(c, 2) - 24 - text_w(v), ty + 18, 0xB4BCE0);
+}
+static R pw_box() { return { (SCRW - 380) / 2, (SCRH - 190) / 2, 380, 190 }; }
+static R pw_btn(int i) { R b = pw_box(); if (i == 2) return { b.x + 100, b.y + 130, 180, 36 }; return { b.x + 20 + i * 180, b.y + 70, 160, 44 }; }
+static void draw_power() {
+    gfx::fill_rect_a(0, 0, SCRW, SCRH, 0x000000, 130); R b = pw_box();
+    gfx::fill_round(b.x, b.y, b.w, b.h, 12, 0x181D38); draw_text_c("Power", b.x, b.y + 14, b.w, 16, 0xFFFFFF, 2);
+    draw_button(pw_btn(0), "Restart", 0xF59E0B, 0x000000); draw_button(pw_btn(1), "Shut down", C_RED, 0xFFFFFF); draw_button(pw_btn(2), "Cancel", 0x4B5563, 0xFFFFFF);
+}
+
+// === КУРСОР (как в Windows/macOS) ===
+static void draw_cursor(int x, int y) {
+    // 12x19 bitmap: 1=чёрный контур, 2=белая заливка, 0=прозрачный
+    static const u8 arrow[19][12] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0},
+        {1,2,2,2,1,0,0,0,0,0,0,0},
+        {1,2,2,2,2,1,0,0,0,0,0,0},
+        {1,2,2,2,2,2,1,0,0,0,0,0},
+        {1,2,2,2,2,2,2,1,0,0,0,0},
+        {1,2,2,2,2,2,2,2,1,0,0,0},
+        {1,2,2,2,2,2,2,2,2,1,0,0},
+        {1,2,2,2,2,2,2,2,2,2,1,0},
+        {1,2,2,2,2,1,1,1,1,1,1,1},
+        {1,2,2,2,1,0,0,0,0,0,0,0},
+        {1,2,1,2,1,0,0,0,0,0,0,0},
+        {1,1,0,1,2,1,0,0,0,0,0,0},
+        {0,0,0,0,1,2,1,0,0,0,0,0},
+        {0,0,0,0,1,2,1,0,0,0,0,0},
+        {0,0,0,0,0,1,1,0,0,0,0,0},
+        {0,0,0,0,0,1,0,0,0,0,0,0}
+    };
+    for (int j = 0; j < 19; j++) {
+        for (int i = 0; i < 12; i++) {
+            u8 v = arrow[j][i];
+            if (v == 1) gfx::put_pixel(x + i, y + j, 0x000000);
+            else if (v == 2) gfx::put_pixel(x + i, y + j, 0xFFFFFF);
         }
     }
-    // Таскбар
-    gfx::fill_rect_a(0, SCRH - TASKBAR_H, SCRW, TASKBAR_H, 0x10142A, 215);
-    gfx::fill_round(6, SCRH - TASKBAR_H + 6, 96, 32, 8, C_ACC); draw_text_c("iMimi", 6, SCRH - TASKBAR_H + 6, 96, 32, 0xFFFFFF);
-    
-    // Курсор
-    gfx::fill_rect(mouse::x, mouse::y, 3, 3, 0xFFFFFF);
 }
 
+static void render() {
+    draw_wallpaper(); draw_desktop_icons();
+    for (int i = 0; i < NAPPS; i++) { int a = zord[i]; if (wins[a].open && !wins[a].min) draw_window(a); }
+    draw_taskbar();
+    if (power_open) draw_power();
+    draw_cursor(mouse::x, mouse::y);
+}
+
+// === INPUT ===
+static void open_app(int a) { if (!wins[a].open) wins[a].open = true; wins[a].min = false; front(a); beep(1000, 40); }
+static void close_app(int a) { wins[a].open = false; wins[a].min = false; beep(700, 40); }
 static void handle_press(int px, int py) {
-    if (py >= SCRH - TASKBAR_H) return;
-    int a = win_at(px, py);
-    if (a >= 0) { front(a); Win& w = wins[a]; if (py < w.y + TITLEH) { drag_win = a; drag_dx = px - w.x; drag_dy = py - w.y; return; } app_click(a, px, py, w.x, w.y + TITLEH, w.w, w.h - TITLEH); return; }
-    for (int i = 0; i < 6; i++) if (hit(desk_icon(i), px, py)) { wins[desk_apps[i]].open = true; wins[desk_apps[i]].min = false; front(desk_apps[i]); return; }
-}
-static void handle_release() { drag_win = -1; }
-static void on_key(int k) {
-    if (k == 27) { int t = top_win(); if (t >= 0) wins[t].open = false; }
-    int t = top_win();
-    if (t == APP_BROWSER) {
-        if (k == '\n') browser_load(); // Enter — загрузить страницу
+    dirty = true;
+    if (power_open) { if (hit(pw_btn(0), px, py)) reboot(); else if (hit(pw_btn(1), px, py)) shutdown(); else power_open = false; return; }
+    if (py >= SCRH - TASKBAR_H) {
+        if (hit(start_btn(), px, py)) { start_open = !start_open; return; }
+        int slot = 0;
+        for (int a = 0; a < NAPPS; a++) if (wins[a].open) { if (hit(taskbar_btn(slot++), px, py)) { if (wins[a].min) { wins[a].min = false; front(a); } else if (top_win() == a) wins[a].min = true; else front(a); return; } }
+        return;
     }
-    if (k == K_UP) web_scroll--;
-    if (k == K_DOWN) web_scroll++;
+    int a = win_at(px, py);
+    if (a >= 0) {
+        front(a); Win& w = wins[a];
+        if (py < w.y + TITLEH) { if (hit(win_close_btn(w), px, py)) { close_app(a); return; } if (hit(win_min_btn(w), px, py)) { w.min = true; return; } drag_win = a; drag_dx = px - w.x; drag_dy = py - w.y; return; }
+        app_click(a, px, py, w.x, w.y + TITLEH, w.w, w.h - TITLEH); return;
+    }
+    for (int i = 0; i < 6; i++) if (hit(desk_icon(i), px, py)) { desk_sel = i; open_app(desk_apps[i]); return; }
+    desk_sel = -1;
+}
+static void handle_release() { drag_win = -1; dirty = true; }
+static void on_key(int k) {
+    dirty = true;
+    if (k == K_F1) { power_open = !power_open; start_open = false; return; }
+    if (k == K_F2) { if (volume < 100) volume += 10; save_settings(); beep(900, 30); return; }
+    if (k == K_F3) { if (volume > 0) volume -= 10; save_settings(); beep(700, 30); return; }
+    if (power_open) { if (k == 27) power_open = false; return; }
+    int t = top_win();
+    if (t == APP_CALC) {
+        if (k >= '0' && k <= '9') { if (calc_new) { calc_disp = k - '0'; calc_new = false; } else calc_disp = calc_disp * 10 + (k - '0'); return; }
+        if (k == '+' || k == '-' || k == '*' || k == '/') { calc_stored = calc_disp; calc_op = (k == '+') ? 1 : (k == '-') ? 2 : (k == '*') ? 3 : 4; calc_new = true; return; }
+        if (k == '=' || k == '\n') { if (calc_op == 1) calc_disp = calc_stored + calc_disp; else if (calc_op == 2) calc_disp = calc_stored - calc_disp; else if (calc_op == 3) calc_disp = calc_stored * calc_disp; else if (calc_op == 4 && calc_disp != 0) calc_disp = calc_stored / calc_disp; calc_op = 0; calc_new = true; return; }
+    }
+    if (t == APP_BROWSER) {
+        if (k == '\n') { browser_load(); return; }
+        if (k == K_UP) { if (web_scroll > 0) web_scroll--; return; }
+        if (k == K_DOWN) { web_scroll++; return; }
+    }
+    if (k == 27) { if (t >= 0) close_app(t); return; }
+    if (!use_kb_mouse) return;
+    int step = 12 * mouse_speed;
+    if (k == K_UP || k == 'w') mouse::y -= step;
+    if (k == K_DOWN || k == 's') mouse::y += step;
+    if (k == K_LEFT || k == 'a') mouse::x -= step;
+    if (k == K_RIGHT || k == 'd') mouse::x += step;
+    if (mouse::x < 0) mouse::x = 0; if (mouse::x > SCRW - 1) mouse::x = SCRW - 1;
+    if (mouse::y < 0) mouse::y = 0; if (mouse::y > SCRH - 1) mouse::y = SCRH - 1;
+    if (k == ' ' || k == '\n') { handle_press(mouse::x, mouse::y); handle_release(); }
 }
 
+// === SPLASH ===
 static void splash(int stage) {
-    gfx::fill_rect(0, 0, SCRW, SCRH, 0xFFFFFF);
-    int dh = 240, dw = img_base_w * dh / img_base_h;
-    gfx::draw_image(SCRW/2 - dw/2, SCRH/2 - 190, dw, dh, img_base_rle, img_base_size, img_base_w, img_base_h);
-    draw_text_c("iMimi OS", 0, SCRH/2 + 70, SCRW, 24, 0x1F2937, 3);
-    gfx::fill_round(SCRW/2 - 150, SCRH/2 + 140, 300, 8, 4, 0xE5E7EB);
-    gfx::fill_round(SCRW/2 - 150, SCRH/2 + 140, 300 * (stage+1) / 3, 8, 4, C_ACC);
+    u32 bg = use_hayricon ? 0x121212 : 0xFFFFFF, fg = use_hayricon ? 0xFFFFFF : 0x1F2937;
+    gfx::fill_rect(0, 0, SCRW, SCRH, bg);
+    Img im = use_hayricon ? Img{img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h} : Img{img_base_rle, img_base_size, img_base_w, img_base_h};
+    int dh = 240, dw = im.w * dh / im.h;
+    gfx::draw_image(SCRW / 2 - dw / 2, SCRH / 2 - 190, dw, dh, im.rle, im.size, im.w, im.h);
+    draw_text_c("iMimi OS", 0, SCRH / 2 + 70, SCRW, 24, fg, 3);
+    draw_text_c("PC Edition", 0, SCRH / 2 + 104, SCRW, 8, 0x888888);
+    int bw = 300, bx = SCRW / 2 - bw / 2, by = SCRH / 2 + 140;
+    gfx::fill_round(bx, by, bw, 8, 4, use_hayricon ? 0x333333 : 0xE5E7EB);
+    gfx::fill_round(bx, by, bw * (stage + 1) / 3, 8, 4, C_ACC);
     gfx::swap();
 }
 
+// === KMAIN ===
 extern "C" void kmain(multiboot_info* mb, u32 magic) {
-    (void)magic; gfx::init(mb); mouse::init(); load_settings(); fs_init(); init_windows(); net_init();
-    splash(0); for(volatile int i=0;i<50000000;i++); splash(1); for(volatile int i=0;i<50000000;i++); splash(2);
+    (void)magic; gfx::init(mb);
+    if (!gfx::ok) { while (1) asm volatile("cli; hlt"); }
+    mouse::init(); load_settings(); fs_init(); init_windows();
+    outb(0x3F8 + 1, 0x00); outb(0x3F8 + 3, 0x80); outb(0x3F8 + 0, 0x03); outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x03); outb(0x3F8 + 2, 0xC7); outb(0x3F8 + 4, 0x0B);
+    splash(0);
+    { u8 last = cmos_read(0); int changes = 0; u32 t0 = 0;
+      for (u32 g = 0; g < 30000000u && changes < 2; g++) { u8 s = cmos_read(0); if (s != last) { last = s; changes++; if (changes == 1) { t0 = tnow(); splash(1); } else { u32 pm = (tnow() - t0) / 1000; if (pm > 1000 && pm < 5000000) tsc16_per_ms = pm; splash(2); } } } }
     render(); gfx::swap();
+    u32 last_clock = 0;
     while (1) {
-        bool need = false;
-        while (inb(0x64) & 1) { u8 b = inb(0x60); if (b & 0x20) mouse::feed(b); else kbd::feed(b); need = true; }
-        if (mouse::ev_press) { mouse::ev_press = false; handle_press(mouse::px, mouse::py); need = true; }
-        if (mouse::ev_release) { mouse::ev_release = false; handle_release(); need = true; }
-        if (clicker_squish > 0) { clicker_squish--; need = true; }
-        if (need) { render(); gfx::swap(); }
+        bool need_render = dirty; dirty = false;
+        while (inb(0x64) & 1) { u8 b = inb(0x60); if (b & 0x20) mouse::feed(b); else kbd::feed(b); need_render = true; }
+        if (mouse::ev_press) { mouse::ev_press = false; handle_press(mouse::px, mouse::py); need_render = true; }
+        if (mouse::ev_release) { mouse::ev_release = false; handle_release(); need_render = true; }
+        if (drag_win >= 0) { wins[drag_win].x = mouse::x - drag_dx; wins[drag_win].y = mouse::y - drag_dy; if (wins[drag_win].x < 0) wins[drag_win].x = 0; if (wins[drag_win].y < 0) wins[drag_win].y = 0; need_render = true; }
+        if (snd_on && (s32)(tnow() - snd_end) >= 0) stop_sound();
+        u32 now = ms_now(); blink_state = ((now / 500) % 2) == 0;
+        if (clicker_squish > 0) { clicker_squish--; need_render = true; }
+        u32 ck = now / 1000;
+        if (ck != last_clock) { last_clock = ck; rtc_time(clock_h, clock_m); need_render = true; }
+        if (has_auto_click) { u32 speed_ms = 1000 - auto_speed_level * 60; if (speed_ms < 100) speed_ms = 100; if (now - auto_t >= speed_ms) { auto_t = now; coins += 1 + click_power_level; if (wins[APP_CLICK].open) need_render = true; } }
+        if (need_render) { render(); gfx::swap(); } else { asm volatile("pause"); }
     }
 }
