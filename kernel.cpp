@@ -308,15 +308,15 @@ static void fs_init() {
 }
 
 // === ОКНА ===
-enum { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER, NAPPS };
-static const char* app_title[NAPPS] = { "Files", "Trash", "Mimi Clicker", "Calculator", "Settings", "Browser" };
+enum { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER, APP_GALLERY, NAPPS };
+static const char* app_title[NAPPS] = { "Files", "Trash", "Mimi Clicker", "Calculator", "Settings", "Browser", "Gallery" };
 struct Win { bool open, min; int x, y, w, h; };
 static Win wins[NAPPS];
 static int zord[NAPPS];
 static int drag_win = -1, drag_dx = 0, drag_dy = 0;
 static bool start_open = false, power_open = false;
 static void init_windows() {
-    static const int sz[NAPPS][2] = { {640,460},{540,400},{580,440},{300,410},{460,400},{600,450} };
+    static const int sz[NAPPS][2] = { {640,460},{540,400},{580,440},{300,410},{460,400},{640,470},{680,520} };
     for (int i = 0; i < NAPPS; i++) {
         wins[i].open = false; wins[i].min = false; wins[i].w = sz[i][0]; wins[i].h = sz[i][1];
         if (wins[i].w > SCRW - 40) wins[i].w = SCRW - 40; if (wins[i].h > SCRH - TASKBAR_H - 20) wins[i].h = SCRH - TASKBAR_H - 20;
@@ -329,10 +329,14 @@ static int top_win() { for (int i = NAPPS - 1; i >= 0; i--) { int a = zord[i]; i
 static int win_at(int x, int y) { for (int i = NAPPS - 1; i >= 0; i--) { int a = zord[i]; Win& w = wins[a]; if (w.open && !w.min && x >= w.x && x < w.x + w.w && y >= w.y && y < w.y + w.h) return a; } return -1; }
 
 // === БРАУЗЕР ===
+// The emulator host bridge fetches pages through COM1; this is a text browser.
 static char web_url[128] = "info.cern.ch";
+static char web_previous[128] = "";
+static char web_loaded_url[128] = "";
 static char web_raw[8192];
 static char web_text[8192];
-static bool web_loading = false;
+static char web_status[96] = "Ready - click address bar to edit";
+static bool web_loading = false, web_editing = false, web_has_previous = false;
 static int web_scroll = 0;
 
 static void strip_html(const char* html, char* out, int max) {
@@ -342,60 +346,184 @@ static void strip_html(const char* html, char* out, int max) {
         if (c == '<') { in_tag = 1; continue; }
         if (c == '>') { in_tag = 0; continue; }
         if (!in_tag) {
-            if (c == '\n' || c == '\r') { if (o > 0 && out[o-1] != '\n') out[o++] = '\n'; }
-            else if (c == '&') {
+            if (c == '\\n' || c == '\\r') {
+                if (o > 0 && out[o-1] != '\\n') out[o++] = '\\n';
+            } else if (c == '&') {
                 if (html[i+1]=='n'&&html[i+2]=='b'&&html[i+3]=='s'&&html[i+4]==';') { out[o++]=' '; i+=4; }
                 else if (html[i+1]=='a'&&html[i+2]=='m'&&html[i+3]=='p'&&html[i+4]==';') { out[o++]='&'; i+=4; }
                 else if (html[i+1]=='l'&&html[i+2]=='t'&&html[i+3]==';') { out[o++]='<'; i+=3; }
                 else if (html[i+1]=='g'&&html[i+2]=='t'&&html[i+3]==';') { out[o++]='>'; i+=3; }
+                else if (html[i+1]=='q'&&html[i+2]=='u'&&html[i+3]=='o'&&html[i+4]=='t'&&html[i+5]==';') { out[o++]='"'; i+=5; }
+                else if (html[i+1]=='#'&&html[i+2]=='3'&&html[i+3]=='9'&&html[i+4]==';') { out[o++]=39; i+=4; }
                 else out[o++] = '&';
-            }
-            else if (c >= 32 || c == '\n') out[o++] = c;
+            } else if ((unsigned char)c >= 32 || c == '\\n') out[o++] = c;
         }
     }
     out[o] = 0;
 }
 
-static void browser_draw(int cx, int cy, int cw, int ch) {
-    gfx::fill_rect(cx, cy, cw, ch, 0xFFFFFF);
-    gfx::fill_rect(cx, cy, cw, 40, 0xE5E7EB);
-    draw_text(web_url, cx + 16, cy + 14, 0x1F2937);
-    if (web_loading) { draw_text_c("Loading...", cx, cy + 60, cw, 40, C_ACC, 2); return; }
-    if (web_text[0] == 0) {
-        draw_text_c("Press ENTER to load the page", cx, cy + 60, cw, ch - 80, C_GRAY);
-        return;
-    }
-    int tx = cx + 16, ty = cy + 56, line = 0;
-    int max_lines = (ch - 70) / 12;
-    for (int i = 0; web_text[i]; i++) {
-        if (line < web_scroll) { if (web_text[i] == '\n') line++; continue; }
-        if (line - web_scroll >= max_lines) break;
-        if (web_text[i] == '\n') { tx = cx + 16; ty += 12; line++; }
-        else { if (tx > cx + cw - 20) { tx = cx + 16; ty += 12; line++; } if (line - web_scroll >= max_lines) break; draw_char(web_text[i], tx, ty, C_TEXT); tx += 8; }
-    }
-}
-
 static void browser_load() {
+    if (!web_url[0]) { scopy(web_status, "Enter an address first", sizeof(web_status)); return; }
     web_loading = true;
-    web_text[0] = 0; web_raw[0] = 0;
+    web_editing = false;
+    web_text[0] = 0;
+    web_raw[0] = 0;
+    scopy(web_status, "Waiting for emulator host bridge...", sizeof(web_status));
     outb(0xE9, 0x01);
-    for (int i = 0; web_url[i]; i++) outb(0xE9, (u8)web_url[i]);
+    for (int n = 0; web_url[n]; n++) outb(0xE9, (u8)web_url[n]);
     outb(0xE9, 0);
-    int i = 0; int timeout = 0;
+    int i = 0, timeout = 0;
     while (i < (int)sizeof(web_raw) - 1) {
-        if ((inb(0x3F8 + 5) & 1) == 0) { if (++timeout > 30000000) break; continue; }
-        int b = inb(0x3F8);
-        if (b == 0) break;
-        web_raw[i++] = (char)b; timeout = 0;
+        if ((inb(0x3F8 + 5) & 1) == 0) {
+            if (++timeout > 30000000) break;
+            continue;
+        }
+        int value = inb(0x3F8);
+        if (value == 0) break;
+        web_raw[i++] = (char)value;
+        timeout = 0;
     }
     web_raw[i] = 0;
-    strip_html(web_raw, web_text, sizeof(web_text));
+    if (i == 0) scopy(web_status, "No response from host bridge (COM1)", sizeof(web_status));
+    else {
+        strip_html(web_raw, web_text, sizeof(web_text));
+        scopy(web_status, "Loaded text response", sizeof(web_status));
+        if (web_loaded_url[0] && !seq(web_loaded_url, web_url)) {
+            scopy(web_previous, web_loaded_url, sizeof(web_previous));
+            web_has_previous = true;
+        }
+        scopy(web_loaded_url, web_url, sizeof(web_loaded_url));
+    }
     web_loading = false;
     web_scroll = 0;
 }
 
+static void browser_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, 0xFFFFFF);
+    gfx::fill_rect(cx, cy, cw, 42, 0xE8ECF3);
+    R back = { cx + 7, cy + 7, 38, 28 };
+    R reload = { cx + 49, cy + 7, 54, 28 };
+    R address = { cx + 109, cy + 7, cw - 184, 28 };
+    R go = { cx + cw - 67, cy + 7, 60, 28 };
+    draw_button(back, "<", 0xD6DEEA, C_TEXT, web_has_previous);
+    draw_button(reload, "Reload", 0xD6DEEA, C_TEXT);
+    gfx::fill_round(address.x, address.y, address.w, address.h, 5, 0xFFFFFF);
+    gfx::rect_outline(address.x, address.y, address.w, address.h, web_editing ? C_ACC : 0xB8C2D2);
+    draw_text_n(web_url, address.x + 7, address.y + 10, C_TEXT, (address.w - 16) / 8);
+    if (web_editing && blink_state) {
+        int cursor_x = address.x + 7 + text_w(web_url);
+        if (cursor_x < address.x + address.w - 5) gfx::fill_rect(cursor_x, address.y + 7, 1, 13, C_ACC);
+    }
+    draw_button(go, "Go", C_ACC, 0xFFFFFF);
+    gfx::fill_rect(cx, cy + 42, cw, 22, 0xF4F6FA);
+    draw_text_n(web_status, cx + 9, cy + 49, 0x64748B, (cw - 18) / 8);
+    const int content_y = cy + 70, content_h = ch - 74;
+    gfx::fill_rect(cx, content_y, cw, content_h, 0xFFFFFF);
+    if (web_loading) { draw_text_c("Loading...", cx, content_y + 30, cw, 32, C_ACC, 2); return; }
+    if (!web_text[0]) {
+        draw_text_c("MinimalZero Text Browser", cx + 8, content_y + 35, cw - 16, 28, C_TEXT, 2);
+        draw_text_c("Click address, type a URL, then press Enter or Go.", cx + 8, content_y + 78, cw - 16, 18, C_GRAY);
+        draw_text_c("Pages are fetched by the emulator host bridge.", cx + 8, content_y + 104, cw - 16, 18, C_GRAY);
+        return;
+    }
+    int tx = cx + 12, ty = content_y + 10, line = 0;
+    const int max_lines = content_h > 20 ? (content_h - 16) / 12 : 1;
+    for (int i = 0; web_text[i]; i++) {
+        if (line < web_scroll) { if (web_text[i] == '\\n') line++; continue; }
+        if (line - web_scroll >= max_lines) break;
+        if (web_text[i] == '\\n') { tx = cx + 12; ty += 12; line++; }
+        else {
+            if (tx > cx + cw - 20) { tx = cx + 12; ty += 12; line++; }
+            if (line - web_scroll >= max_lines) break;
+            draw_char(web_text[i], tx, ty, C_TEXT);
+            tx += 8;
+        }
+    }
+}
+
 static void browser_click(int px, int py, int cx, int cy, int cw, int ch) {
-    (void)px; (void)py; (void)cx; (void)cy; (void)cw; (void)ch;
+    R back = { cx + 7, cy + 7, 38, 28 };
+    R reload = { cx + 49, cy + 7, 54, 28 };
+    R address = { cx + 109, cy + 7, cw - 184, 28 };
+    R go = { cx + cw - 67, cy + 7, 60, 28 };
+    if (hit(back, px, py) && web_has_previous) {
+        char current[128]; scopy(current, web_url, sizeof(current));
+        scopy(web_url, web_previous, sizeof(web_url));
+        scopy(web_previous, current, sizeof(web_previous));
+        browser_load(); return;
+    }
+    if (hit(reload, px, py)) { browser_load(); return; }
+    if (hit(address, px, py)) { web_url[0] = 0; web_editing = true; return; }
+    if (hit(go, px, py)) { browser_load(); return; }
+    if (py >= cy + 70) {
+        int lines = 0;
+        for (int i = 0; web_text[i]; i++) if (web_text[i] == '\\n') lines++;
+        int visible = (ch - 90) / 12;
+        if (py < cy + ch / 2 && web_scroll > 0) web_scroll--;
+        else if (web_scroll + visible < lines + 1) web_scroll++;
+    }
+}
+
+// === APP GALLERY ===
+static int gallery_selected = -1;
+static const Img gallery_images[] = {
+    { gallery_0_rle, gallery_0_size, gallery_0_w, gallery_0_h },
+    { gallery_1_rle, gallery_1_size, gallery_1_w, gallery_1_h },
+    { gallery_2_rle, gallery_2_size, gallery_2_w, gallery_2_h },
+    { gallery_3_rle, gallery_3_size, gallery_3_w, gallery_3_h },
+    { gallery_4_rle, gallery_4_size, gallery_4_w, gallery_4_h },
+    { gallery_5_rle, gallery_5_size, gallery_5_w, gallery_5_h },
+    { gallery_6_rle, gallery_6_size, gallery_6_w, gallery_6_h },
+    { gallery_7_rle, gallery_7_size, gallery_7_w, gallery_7_h }
+};
+static void gallery_draw(int cx, int cy, int cw, int ch) {
+    gfx::fill_rect(cx, cy, cw, ch, 0xF4F6FA);
+    if (gallery_selected >= 0 && gallery_selected < gallery_image_count) {
+        R back = { cx + 10, cy + 8, 64, 28 }, prev = { cx + cw - 142, cy + 8, 58, 28 }, next = { cx + cw - 76, cy + 8, 66, 28 };
+        draw_button(back, "Back", 0xDCE4F0, C_TEXT);
+        draw_button(prev, "Prev", 0xDCE4F0, C_TEXT);
+        draw_button(next, "Next", C_ACC, 0xFFFFFF);
+        draw_text_n(gallery_image_names[gallery_selected], cx + 88, cy + 18, C_TEXT, 24);
+        Img im = gallery_images[gallery_selected];
+        int maxw = cw - 36, maxh = ch - 62, dw = maxw, dh = im.h * dw / im.w;
+        if (dh > maxh) { dh = maxh; dw = im.w * dh / im.h; }
+        if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+        int ix = cx + (cw - dw) / 2, iy = cy + 48 + (maxh - dh) / 2;
+        gfx::fill_round(ix - 4, iy - 4, dw + 8, dh + 8, 6, 0xFFFFFF);
+        gfx::rect_outline(ix - 4, iy - 4, dw + 8, dh + 8, 0xD1D9E6);
+        gfx::draw_image(ix, iy, dw, dh, im.rle, im.size, im.w, im.h);
+        return;
+    }
+    draw_text("Pictures from Assetst/", cx + 14, cy + 12, C_TEXT, 2);
+    draw_text("Select a photo to open it", cx + 16, cy + 34, 0x64748B);
+    const int cols = 3, gap = 10, cellw = (cw - 48) / 3, top = cy + 58, cellh = (ch - 68) / 3;
+    for (int i = 0; i < gallery_image_count && i < 9; i++) {
+        int x = cx + 14 + (i % cols) * (cellw + gap), y = top + (i / cols) * cellh;
+        R tile = { x, y, cellw, cellh - 6 };
+        gfx::fill_round(x, y, cellw, cellh - 6, 7, 0xFFFFFF);
+        gfx::rect_outline(x, y, cellw, cellh - 6, hov(tile) ? C_ACC : 0xD8DEE9);
+        Img im = gallery_images[i];
+        int maxw = cellw - 16, maxh = cellh - 34, dw = maxw, dh = im.h * dw / im.w;
+        if (dh > maxh) { dh = maxh; dw = im.w * dh / im.h; }
+        if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+        gfx::draw_image(x + (cellw - dw) / 2, y + 5 + (maxh - dh) / 2, dw, dh, im.rle, im.size, im.w, im.h);
+        draw_text_n(gallery_image_names[i], x + 7, y + cellh - 20, C_TEXT, (cellw - 14) / 8);
+    }
+}
+static void gallery_click(int px, int py, int cx, int cy, int cw, int ch) {
+    (void)ch;
+    if (gallery_selected >= 0) {
+        R back = { cx + 10, cy + 8, 64, 28 }, prev = { cx + cw - 142, cy + 8, 58, 28 }, next = { cx + cw - 76, cy + 8, 66, 28 };
+        if (hit(back, px, py)) { gallery_selected = -1; return; }
+        if (hit(prev, px, py)) { gallery_selected = (gallery_selected + gallery_image_count - 1) % gallery_image_count; return; }
+        if (hit(next, px, py)) { gallery_selected = (gallery_selected + 1) % gallery_image_count; return; }
+        return;
+    }
+    const int cols = 3, gap = 10, cellw = (cw - 48) / 3, top = cy + 58, cellh = (ch - 68) / 3;
+    for (int i = 0; i < gallery_image_count && i < 9; i++) {
+        int x = cx + 14 + (i % cols) * (cellw + gap), y = top + (i / cols) * cellh;
+        if (hit({x, y, cellw, cellh - 6}, px, py)) { gallery_selected = i; return; }
+    }
 }
 
 // === APP FILES ===
@@ -533,10 +661,10 @@ static void settings_click(int px, int py, int cx, int cy, int cw, int ch) {
 
 // === APP DISPATCH ===
 static void app_draw(int a, int cx, int cy, int cw, int ch) {
-    switch (a) { case APP_FILES: files_draw(cx, cy, cw, ch); break; case APP_TRASH: trash_draw(cx, cy, cw, ch); break; case APP_CLICK: clicker_draw(cx, cy, cw, ch); break; case APP_CALC: calc_draw(cx, cy, cw, ch); break; case APP_SET: settings_draw(cx, cy, cw, ch); break; case APP_BROWSER: browser_draw(cx, cy, cw, ch); break; }
+    switch (a) { case APP_FILES: files_draw(cx, cy, cw, ch); break; case APP_TRASH: trash_draw(cx, cy, cw, ch); break; case APP_CLICK: clicker_draw(cx, cy, cw, ch); break; case APP_CALC: calc_draw(cx, cy, cw, ch); break; case APP_SET: settings_draw(cx, cy, cw, ch); break; case APP_BROWSER: browser_draw(cx, cy, cw, ch); break; case APP_GALLERY: gallery_draw(cx, cy, cw, ch); break; }
 }
 static void app_click(int a, int px, int py, int cx, int cy, int cw, int ch) {
-    switch (a) { case APP_FILES: files_click(px, py, cx, cy, cw, ch); break; case APP_TRASH: trash_click(px, py, cx, cy, cw, ch); break; case APP_CLICK: clicker_click(px, py, cx, cy, cw, ch); break; case APP_CALC: calc_click(px, py, cx, cy, cw, ch); break; case APP_SET: settings_click(px, py, cx, cy, cw, ch); break; case APP_BROWSER: browser_click(px, py, cx, cy, cw, ch); break; }
+    switch (a) { case APP_FILES: files_click(px, py, cx, cy, cw, ch); break; case APP_TRASH: trash_click(px, py, cx, cy, cw, ch); break; case APP_CLICK: clicker_click(px, py, cx, cy, cw, ch); break; case APP_CALC: calc_click(px, py, cx, cy, cw, ch); break; case APP_SET: settings_click(px, py, cx, cy, cw, ch); break; case APP_BROWSER: browser_click(px, py, cx, cy, cw, ch); break; case APP_GALLERY: gallery_click(px, py, cx, cy, cw, ch); break; }
 }
 
 // === ICONS ===
@@ -546,17 +674,18 @@ static void draw_app_icon(int a, int x, int y) {
     else if (a == APP_CLICK) { Img im = use_hayricon ? Img{img_hayrulla_rle, img_hayrulla_size, img_hayrulla_w, img_hayrulla_h} : Img{img_base_rle, img_base_size, img_base_w, img_base_h}; int dh = 52, dw = im.w * dh / im.h; if (dw > 52) { dw = 52; dh = im.h * dw / im.w; } gfx::fill_round(x, y, 56, 56, 12, 0xFFFFFF); gfx::draw_image(x + 28 - dw / 2, y + 28 - dh / 2, dw, dh, im.rle, im.size, im.w, im.h); }
     else if (a == APP_CALC) { gfx::fill_round(x + 6, y + 1, 44, 54, 7, 0x2D3340); gfx::fill_round(x + 11, y + 6, 34, 14, 3, 0x9BE7A7); for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) gfx::fill_round(x + 11 + c * 9, y + 25 + r * 7, 7, 5, 1, c == 3 ? 0xF59E0B : 0xE5E7EB); }
     else if (a == APP_BROWSER) { gfx::fill_circle(x + 28, y + 28, 26, 0x3B82F6); gfx::fill_circle(x + 28, y + 28, 22, 0x60A5FA); gfx::fill_rect(x + 27, y + 6, 2, 44, 0xFFFFFF); gfx::fill_rect(x + 6, y + 27, 44, 2, 0xFFFFFF); gfx::fill_circle(x + 28, y + 28, 10, 0xFFFFFF); }
+    else if (a == APP_GALLERY) { gfx::fill_round(x + 2, y + 5, 52, 46, 6, 0xDCE7F5); gfx::fill_round(x + 6, y + 9, 44, 38, 4, 0xFFFFFF); gfx::fill_circle(x + 39, y + 19, 5, 0xF5C542); gfx::fill_rect(x + 10, y + 33, 14, 10, 0x60A5FA); gfx::fill_rect(x + 24, y + 27, 20, 16, 0x22C55E); }
     else { int cx = x + 28, cy = y + 28; static const int dx[8] = { 22, 15, 0, -15, -22, -15, 0, 15 }, dy[8] = { 0, 15, 22, 15, 0, -15, -22, -15 }; for (int k = 0; k < 8; k++) gfx::fill_round(cx + dx[k] - 5, cy + dy[k] - 5, 10, 10, 3, 0xAEB6C4); gfx::fill_circle(cx, cy, 18, 0xAEB6C4); gfx::fill_circle(cx, cy, 8, 0x4B5563); }
 }
 
-static const int desk_apps[6] = { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER };
-static R desk_icon(int i) { return { 18, 18 + i * 82, 88, 78 }; }
+static const int desk_apps[7] = { APP_FILES, APP_TRASH, APP_CLICK, APP_CALC, APP_SET, APP_BROWSER, APP_GALLERY };
+static R desk_icon(int i) { return i < 6 ? R{ 18, 18 + i * 82, 88, 78 } : R{ 112, 18, 88, 78 }; }
 static int desk_sel = -1;
 
 // === RENDER ===
 static void draw_wallpaper() { gfx::fill_gradient(0, 0, SCRW, SCRH, 0x0E1A3F, 0x4A2A6B); gfx::fill_circle(SCRW * 3 / 4, SCRH / 3, SCRH / 3, 0x5B7CFA, 40); gfx::fill_circle(SCRW / 3, SCRH * 3 / 4, SCRH / 4, 0xFF6FB5, 34); }
 static void draw_desktop_icons() {
-    for (int i = 0; i < 6; i++) { R r = desk_icon(i); if (desk_sel == i) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 70); else if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 34); draw_app_icon(desk_apps[i], r.x + 16, r.y + 6); const char* t = app_title[desk_apps[i]]; int tw = text_w(t); if (tw > r.w) tw = r.w; draw_text(t, r.x + (r.w - text_w(t)) / 2 + 1, r.y + 71, 0x000000); draw_text(t, r.x + (r.w - text_w(t)) / 2, r.y + 70, 0xFFFFFF); }
+    for (int i = 0; i < 7; i++) { R r = desk_icon(i); if (desk_sel == i) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 70); else if (hov(r)) gfx::fill_round(r.x, r.y, r.w, r.h, 10, 0xFFFFFF, 34); draw_app_icon(desk_apps[i], r.x + 16, r.y + 6); const char* t = app_title[desk_apps[i]]; int tw = text_w(t); if (tw > r.w) tw = r.w; draw_text(t, r.x + (r.w - text_w(t)) / 2 + 1, r.y + 71, 0x000000); draw_text(t, r.x + (r.w - text_w(t)) / 2, r.y + 70, 0xFFFFFF); }
 }
 static R win_close_btn(const Win& w) { return { w.x + w.w - 30, w.y + 4, 24, 22 }; }
 static R win_min_btn(const Win& w) { return { w.x + w.w - 58, w.y + 4, 24, 22 }; }
@@ -649,7 +778,7 @@ static void handle_press(int px, int py) {
         if (py < w.y + TITLEH) { if (hit(win_close_btn(w), px, py)) { close_app(a); return; } if (hit(win_min_btn(w), px, py)) { w.min = true; return; } drag_win = a; drag_dx = px - w.x; drag_dy = py - w.y; return; }
         app_click(a, px, py, w.x, w.y + TITLEH, w.w, w.h - TITLEH); return;
     }
-    for (int i = 0; i < 6; i++) if (hit(desk_icon(i), px, py)) { desk_sel = i; open_app(desk_apps[i]); return; }
+    for (int i = 0; i < 7; i++) if (hit(desk_icon(i), px, py)) { desk_sel = i; open_app(desk_apps[i]); return; }
     desk_sel = -1;
 }
 static void handle_release() { drag_win = -1; dirty = true; }
@@ -666,9 +795,25 @@ static void on_key(int k) {
         if (k == '=' || k == '\n') { if (calc_op == 1) calc_disp = calc_stored + calc_disp; else if (calc_op == 2) calc_disp = calc_stored - calc_disp; else if (calc_op == 3) calc_disp = calc_stored * calc_disp; else if (calc_op == 4 && calc_disp != 0) calc_disp = calc_stored / calc_disp; calc_op = 0; calc_new = true; return; }
     }
     if (t == APP_BROWSER) {
+        if (web_editing) {
+            if (k == 27) { web_editing = false; return; }
+            if (k == '\n') { browser_load(); return; }
+            int n = slen(web_url);
+            if (k == '\b') { if (n > 0) web_url[n - 1] = 0; return; }
+            if (k >= 32 && k <= 126 && n < (int)sizeof(web_url) - 1) {
+                web_url[n] = (char)k; web_url[n + 1] = 0; return;
+            }
+            return;
+        }
         if (k == '\n') { browser_load(); return; }
         if (k == K_UP) { if (web_scroll > 0) web_scroll--; return; }
         if (k == K_DOWN) { web_scroll++; return; }
+        if (k == 'r' || k == 'R') { browser_load(); return; }
+    }
+    if (t == APP_GALLERY && gallery_selected >= 0) {
+        if (k == K_LEFT) { gallery_selected = (gallery_selected + gallery_image_count - 1) % gallery_image_count; return; }
+        if (k == K_RIGHT) { gallery_selected = (gallery_selected + 1) % gallery_image_count; return; }
+        if (k == 27) { gallery_selected = -1; return; }
     }
     if (k == 27) { if (t >= 0) close_app(t); return; }
     if (!use_kb_mouse) return;
