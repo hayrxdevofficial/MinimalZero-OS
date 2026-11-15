@@ -4,13 +4,14 @@ LD = ld -m elf_i386
 CFLAGS = -m32 -ffreestanding -fno-exceptions -fno-rtti -O2 -Wall -Wextra -mno-sse -mno-sse2 -mno-mmx -fno-builtin -fno-stack-protector -fno-pic -fno-pie -std=c++11
 LDFLAGS = -m elf_i386 -T linker.ld
 OBJS = boot.o kernel.o
+ASSET_IMAGES = $(wildcard Assetst/*.jpg Assetst/*.jpeg Assetst/*.png)
 
 all: imimi.iso
 
 img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg:
 	bash tools/fetch_splash.sh
 
-images.h: img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg tools/img2c.py
+images.h: img_base.jpg img_adult.jpg img_cool.jpg img_hayrulla.jpg tools/img2c.py $(ASSET_IMAGES)
 	python3 tools/img2c.py
 
 boot.o: boot.asm
